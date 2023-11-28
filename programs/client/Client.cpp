@@ -50,6 +50,8 @@
 #include <Functions/registerFunctions.h>
 #include <AggregateFunctions/registerAggregateFunctions.h>
 #include <Formats/registerFormats.h>
+// MILIND
+#include <Sketches/registerSketches.h>
 
 #ifndef __clang__
 #pragma GCC optimize("-fno-var-tracking-assignments")
@@ -326,6 +328,8 @@ try
     registerFormats();
     registerFunctions();
     registerAggregateFunctions();
+    // MILIND
+    registerSketches();
 
     processConfig();
     adjustSettings();
