@@ -268,7 +268,7 @@
 	url = https://github.com/morton-nd/morton-nd
 [submodule "contrib/xxHash"]
 	path = contrib/xxHash
-	url = https://github.com/Cyan4973/xxHash
+	url = git@github.com:SketchDB/xxHash_SketchDB.git
 [submodule "contrib/crc32-s390x"]
 	path = contrib/crc32-s390x
 	url = https://github.com/linux-on-ibm-z/crc32-s390x
