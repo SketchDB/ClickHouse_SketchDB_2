@@ -1,0 +1,3028 @@
+diff --git a/.gitignore b/.gitignore
+index 5341f23a94f..73fd544d25e 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -5,6 +5,7 @@
+ 
+ # vim cache files
+ *.swp
++*.swo
+ 
+ # auto generated files
+ *.logrt
+diff --git a/build.sh b/build.sh
+new file mode 100755
+index 00000000000..494e84ba8f0
+--- /dev/null
++++ b/build.sh
+@@ -0,0 +1,2 @@
++#!/bin/bash
++cmake --build build --target clickhouse
+diff --git a/programs/client/CMakeLists.txt b/programs/client/CMakeLists.txt
+index e160355ef7b..ac03ce10928 100644
+--- a/programs/client/CMakeLists.txt
++++ b/programs/client/CMakeLists.txt
+@@ -11,6 +11,8 @@ set (CLICKHOUSE_CLIENT_LINK
+         clickhouse_functions
+         clickhouse_parsers
+         string_utils
++        # MILIND
++        clickhouse_sketches
+ )
+ 
+ if (TARGET ch_rust::skim)
+diff --git a/programs/client/Client.cpp b/programs/client/Client.cpp
+index 723707d9ec3..62d9eb4e7c0 100644
+--- a/programs/client/Client.cpp
++++ b/programs/client/Client.cpp
+@@ -53,6 +53,8 @@
+ #include <Functions/registerFunctions.h>
+ #include <AggregateFunctions/registerAggregateFunctions.h>
+ #include <Formats/registerFormats.h>
++// MILIND
++#include <Sketches/registerSketches.h>
+ 
+ #ifndef __clang__
+ #pragma GCC optimize("-fno-var-tracking-assignments")
+@@ -325,6 +327,8 @@ try
+     registerFormats();
+     registerFunctions();
+     registerAggregateFunctions();
++    // MILIND
++    registerSketches();
+ 
+     processConfig();
+     adjustSettings();
+diff --git a/programs/server/CMakeLists.txt b/programs/server/CMakeLists.txt
+index 81440b03690..a76f52aef52 100644
+--- a/programs/server/CMakeLists.txt
++++ b/programs/server/CMakeLists.txt
+@@ -14,6 +14,8 @@ set (CLICKHOUSE_SERVER_LINK
+         clickhouse_storages_system
+         clickhouse_table_functions
+         string_utils
++        # MILIND
++        clickhouse_sketches
+ 
+     ${LINK_RESOURCE_LIB}
+ 
+diff --git a/programs/server/Server.cpp b/programs/server/Server.cpp
+index 85ae6d7796c..2f9b186cfe6 100644
+--- a/programs/server/Server.cpp
++++ b/programs/server/Server.cpp
+@@ -96,6 +96,8 @@
+ #include <Core/ServerSettings.h>
+ #include <filesystem>
+ #include <unordered_set>
++// MILIND
++#include <Sketches/registerSketches.h>
+ 
+ #include "config.h"
+ #include "config_version.h"
+@@ -652,6 +654,8 @@ try
+     registerRemoteFileMetadatas();
+     registerSchedulerNodes();
+     registerResourceManagers();
++    // MILIND
++    registerSketches();
+ 
+     CurrentMetrics::set(CurrentMetrics::Revision, ClickHouseRevision::getVersionRevision());
+     CurrentMetrics::set(CurrentMetrics::VersionInteger, ClickHouseRevision::getVersionInteger());
+diff --git a/programs/server/config.xml b/programs/server/config.xml
+index d0bf1c7d66a..87a060575f4 100644
+--- a/programs/server/config.xml
++++ b/programs/server/config.xml
+@@ -21,7 +21,8 @@
+ 
+             [1]: https://github.com/pocoproject/poco/blob/poco-1.9.4-release/Foundation/include/Poco/Logger.h#L105-L114
+         -->
+-        <level>trace</level>
++        <!-- <level>trace</level> -->
++        <level>information</level>
+         <log>/var/log/clickhouse-server/clickhouse-server.log</log>
+         <errorlog>/var/log/clickhouse-server/clickhouse-server.err.log</errorlog>
+         <!-- Rotation policy
+@@ -1074,6 +1075,9 @@
+         <buffer_size_rows_flush_threshold>524288</buffer_size_rows_flush_threshold>
+         <!-- Indication whether logs should be dumped to the disk in case of a crash -->
+         <flush_on_crash>false</flush_on_crash>
++        <query_profiler_cpu_time_period_ns>1000000000</query_profiler_cpu_time_period_ns>
++        <query_profiler_wall_time_period_ns>1000000000</query_profiler_wall_time_period_ns>
++        <allow_introspection_functions>0</allow_introspection_functions>
+     </trace_log>
+ 
+     <!-- Query thread log. Has information about all threads participated in query execution.
+diff --git a/src/AggregateFunctions/AggregateFunctionFactory.h b/src/AggregateFunctions/AggregateFunctionFactory.h
+index dab0d28e851..1aad5300c14 100644
+--- a/src/AggregateFunctions/AggregateFunctionFactory.h
++++ b/src/AggregateFunctions/AggregateFunctionFactory.h
+@@ -53,6 +53,9 @@ struct AggregateFunctionWithProperties
+ class AggregateFunctionFactory final : private boost::noncopyable, public IFactoryWithAliases<AggregateFunctionWithProperties>
+ {
+ public:
++    // MILIND
++    AggregateFunctionFactory() : log(&Poco::Logger::get("AggregateFunctionFactory")) {}
++
+     static AggregateFunctionFactory & instance();
+ 
+     /// Register a function by its name.
+@@ -102,6 +105,8 @@ private:
+ 
+     String getFactoryName() const override { return "AggregateFunctionFactory"; }
+ 
++    // MILIND
++    Poco::Logger * log;
+ };
+ 
+ struct AggregateUtils
+diff --git a/src/AggregateFunctions/CMakeLists.txt b/src/AggregateFunctions/CMakeLists.txt
+index 9471934aec8..f193a230896 100644
+--- a/src/AggregateFunctions/CMakeLists.txt
++++ b/src/AggregateFunctions/CMakeLists.txt
+@@ -1,6 +1,7 @@
+ include("${ClickHouse_SOURCE_DIR}/cmake/dbms_glob_sources.cmake")
+ add_headers_and_sources(clickhouse_aggregate_functions .)
+ add_headers_and_sources(clickhouse_aggregate_functions Combinators)
++add_headers_and_sources(clickhouse_aggregate_functions sketches)
+ 
+ extract_into_parent_list(clickhouse_aggregate_functions_sources dbms_sources
+     IAggregateFunction.cpp
+@@ -22,7 +23,7 @@ extract_into_parent_list(clickhouse_aggregate_functions_headers dbms_headers
+ )
+ 
+ add_library(clickhouse_aggregate_functions ${clickhouse_aggregate_functions_headers} ${clickhouse_aggregate_functions_sources})
+-target_link_libraries(clickhouse_aggregate_functions PRIVATE dbms PUBLIC ch_contrib::cityhash)
++target_link_libraries(clickhouse_aggregate_functions PRIVATE dbms PUBLIC ch_contrib::cityhash ch_contrib::xxHash)
+ 
+ if(ENABLE_EXAMPLES)
+     add_subdirectory(examples)
+diff --git a/src/AggregateFunctions/registerAggregateFunctions.cpp b/src/AggregateFunctions/registerAggregateFunctions.cpp
+index 96ba94aed91..4e2abeee2d1 100644
+--- a/src/AggregateFunctions/registerAggregateFunctions.cpp
++++ b/src/AggregateFunctions/registerAggregateFunctions.cpp
+@@ -84,6 +84,13 @@ void registerAggregateFunctionFlameGraph(AggregateFunctionFactory &);
+ void registerAggregateFunctionKolmogorovSmirnovTest(AggregateFunctionFactory & factory);
+ void registerAggregateFunctionLargestTriangleThreeBuckets(AggregateFunctionFactory & factory);
+ 
++// MILIND
++void registerAggregateFunctionEntropyCountSketch(AggregateFunctionFactory &);
++void registerAggregateFunctionHeavyHitterCardinalitiesCountSketch(AggregateFunctionFactory &);
++void registerAggregateFunctionHeavyHitterFlowkeysCountSketch(AggregateFunctionFactory &);
++void registerAggregateFunctionEntropyMRAC(AggregateFunctionFactory &);
++void registerAggregateFunctionCardinalityLC(AggregateFunctionFactory &);
++
+ class AggregateFunctionCombinatorFactory;
+ void registerAggregateFunctionCombinatorIf(AggregateFunctionCombinatorFactory &);
+ void registerAggregateFunctionCombinatorArray(AggregateFunctionCombinatorFactory &);
+@@ -180,6 +187,13 @@ void registerAggregateFunctions()
+         registerAggregateFunctionKolmogorovSmirnovTest(factory);
+         registerAggregateFunctionLargestTriangleThreeBuckets(factory);
+ 
++        // MILIND
++        registerAggregateFunctionEntropyCountSketch(factory);
++        registerAggregateFunctionHeavyHitterCardinalitiesCountSketch(factory);
++        registerAggregateFunctionHeavyHitterFlowkeysCountSketch(factory);
++        registerAggregateFunctionEntropyMRAC(factory);
++        registerAggregateFunctionCardinalityLC(factory);
++
+         registerWindowFunctions(factory);
+     }
+ 
+diff --git a/src/AggregateFunctions/sketches/AggregateFunctionCardinalityLC.cpp b/src/AggregateFunctions/sketches/AggregateFunctionCardinalityLC.cpp
+new file mode 100644
+index 00000000000..0109d79d226
+--- /dev/null
++++ b/src/AggregateFunctions/sketches/AggregateFunctionCardinalityLC.cpp
+@@ -0,0 +1,38 @@
++#include <AggregateFunctions/AggregateFunctionFactory.h>
++#include <AggregateFunctions/sketches/AggregateFunctionCardinalityLC.h>
++#include <AggregateFunctions/FactoryHelpers.h>
++#include <AggregateFunctions/Helpers.h>
++
++namespace DB
++{
++struct Settings;
++
++namespace ErrorCodes
++{
++    extern const int NUMBER_OF_ARGUMENTS_DOESNT_MATCH;
++}
++
++namespace
++{
++
++AggregateFunctionPtr createAggregateFunctionCardinalityLC(
++    const std::string & name, const DataTypes & argument_types, const Array & parameters, const Settings *)
++{
++    assertNoParameters(name, parameters);
++    if (argument_types.empty())
++        throw Exception(ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH,
++                        "Incorrect number of arguments for aggregate function {}", name);
++
++    return std::make_shared<AggregateFunctionCardinalityLC>(argument_types);
++}
++
++}
++
++void registerAggregateFunctionCardinalityLC(AggregateFunctionFactory & factory)
++{
++    factory.registerFunction("cardinality_sketch_lc", createAggregateFunctionCardinalityLC);
++}
++
++}
++
++
+diff --git a/src/AggregateFunctions/sketches/AggregateFunctionCardinalityLC.h b/src/AggregateFunctions/sketches/AggregateFunctionCardinalityLC.h
+new file mode 100644
+index 00000000000..9129a08a1d2
+--- /dev/null
++++ b/src/AggregateFunctions/sketches/AggregateFunctionCardinalityLC.h
+@@ -0,0 +1,127 @@
++#pragma once
++
++#include <AggregateFunctions/IAggregateFunction.h>
++#include <DataTypes/DataTypesNumber.h>
++#include <Columns/ColumnVector.h>
++#include <Columns/ColumnArray.h>
++#include <Common/assert_cast.h>
++
++#include <cmath>
++
++namespace DB
++{
++
++struct LCData
++{
++    using sketch_t = bool;
++    std::vector<sketch_t> sketch_array;
++    uint64_t sketch_total;
++    unsigned int levels, rows, width;
++
++    void add(const IColumn ** columns, size_t row_num, Poco::Logger * /*log*/)
++    {
++        const auto & column = assert_cast<const ColumnArray &>(*columns[0]);
++        Field row_field;
++        column.get(row_num, row_field);
++
++        if (row_num == 0)
++        {
++            Array & arguments = row_field.get<const Array &>();
++            // TODO: fix this -- data will be lost here since column type is Array(Bool)
++            sketch_total = arguments[0].get<const uint64_t &>();
++            levels = static_cast<const unsigned int &>(arguments[1].get<const uint64_t &>());
++            rows = static_cast<const unsigned int &>(arguments[2].get<const uint64_t &>());
++            width = static_cast<const unsigned int &>(arguments[3].get<const uint64_t &>());
++            assert(levels == 1);
++            assert(rows == 1);
++            sketch_array.resize(width);
++        }
++        else
++        {
++            row_num -= 1;
++            for(uint32_t i = 0; i < width; i++)
++            {
++                // TODO: Why is column an Array(long)?
++                Field & column_field = row_field.get<const Array &>()[i];
++                sketch_array[i] = static_cast<const sketch_t &>(column_field.get<const long &>());
++            }
++        }
++    }
++
++    Float64 get(Poco::Logger * /*log*/) const
++    {
++        UInt64 zero_bits = 0;
++        for(uint32_t i = 0; i < width; i++)
++        {
++            if (sketch_array[i] == 0)
++                zero_bits++;
++        }
++
++        if (zero_bits == 0)
++        {
++            zero_bits = 1;
++        }
++
++        return static_cast<Float64>(width) * std::log(static_cast<Float64>(width) / static_cast<Float64>(zero_bits));
++    }
++};
++
++class AggregateFunctionCardinalityLC final : public IAggregateFunctionDataHelper<LCData, AggregateFunctionCardinalityLC>
++{
++private:
++    size_t num_args;
++    Poco::Logger * log;
++
++public:
++    explicit AggregateFunctionCardinalityLC(const DataTypes & argument_types_)
++        : IAggregateFunctionDataHelper<LCData, AggregateFunctionCardinalityLC>(argument_types_, {}, createResultType())
++        , num_args(argument_types_.size())
++        , log(&Poco::Logger::get("AggregateFunctionCardinalityLC"))
++    {
++        LOG_WARNING(log, "num_args {}", num_args);
++        for(size_t i = 0; i < num_args; i++)
++            LOG_WARNING(log, "arg {} type {}", i, argument_types_[i]->getName());
++    }
++
++    String getName() const override
++    {
++        return "AggregateFunctionCardinalityLC_sketch";
++    }
++
++    static DataTypePtr createResultType()
++    {
++        return std::make_shared<DataTypeNumber<Float64>>();
++    }
++    
++    bool allocatesMemoryInArena() const override { return false; }
++
++    void add(AggregateDataPtr __restrict place, const IColumn ** columns, size_t row_num, Arena *) const override
++    {
++        this->data(place).add(columns, row_num, log);
++    }
++    
++    void merge(AggregateDataPtr __restrict /*place*/, ConstAggregateDataPtr /*rhs*/, Arena *) const override
++    {
++        //this->data(place).merge(this->data(rhs));
++    }
++
++    void serialize(ConstAggregateDataPtr __restrict /*place*/, WriteBuffer & /*buf*/, std::optional<size_t> /* version */) const override
++    {
++        //this->data(const_cast<AggregateDataPtr>(place)).serialize(buf);
++    }
++
++    void deserialize(AggregateDataPtr __restrict /*place*/, ReadBuffer & /*buf*/, std::optional<size_t> /* version */, Arena * /* arena */) const override
++    {
++        //this->data(place).deserialize(buf);
++    }
++
++    void insertResultInto(AggregateDataPtr __restrict place, IColumn & to, Arena *) const override
++    {
++        auto & column = assert_cast<ColumnVector<Float64> &>(to);
++        column.getData().push_back(this->data(place).get(log));
++    }
++};
++
++}
++
++
+diff --git a/src/AggregateFunctions/sketches/AggregateFunctionEntropyCountSketch.cpp b/src/AggregateFunctions/sketches/AggregateFunctionEntropyCountSketch.cpp
+new file mode 100644
+index 00000000000..c5884d54ff8
+--- /dev/null
++++ b/src/AggregateFunctions/sketches/AggregateFunctionEntropyCountSketch.cpp
+@@ -0,0 +1,36 @@
++#include <AggregateFunctions/AggregateFunctionFactory.h>
++#include <AggregateFunctions/sketches/AggregateFunctionEntropyCountSketch.h>
++#include <AggregateFunctions/FactoryHelpers.h>
++#include <AggregateFunctions/Helpers.h>
++
++namespace DB
++{
++struct Settings;
++
++namespace ErrorCodes
++{
++    extern const int NUMBER_OF_ARGUMENTS_DOESNT_MATCH;
++}
++
++namespace
++{
++
++AggregateFunctionPtr createAggregateFunctionEntropyCountSketch(
++    const std::string & name, const DataTypes & argument_types, const Array & parameters, const Settings *)
++{
++    assertNoParameters(name, parameters);
++    if (argument_types.empty())
++        throw Exception(ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH,
++                        "Incorrect number of arguments for aggregate function {}", name);
++
++    return std::make_shared<AggregateFunctionEntropyCountSketch>(argument_types);
++}
++
++}
++
++void registerAggregateFunctionEntropyCountSketch(AggregateFunctionFactory & factory)
++{
++    factory.registerFunction("entropy_sketch_cs", createAggregateFunctionEntropyCountSketch);
++}
++
++}
+diff --git a/src/AggregateFunctions/sketches/AggregateFunctionEntropyCountSketch.h b/src/AggregateFunctions/sketches/AggregateFunctionEntropyCountSketch.h
+new file mode 100644
+index 00000000000..b0664bc2319
+--- /dev/null
++++ b/src/AggregateFunctions/sketches/AggregateFunctionEntropyCountSketch.h
+@@ -0,0 +1,138 @@
++#pragma once
++
++#include <AggregateFunctions/IAggregateFunction.h>
++#include <AggregateFunctions/sketches/Utils.h>
++#include <DataTypes/DataTypesNumber.h>
++#include <Columns/ColumnVector.h>
++#include <Columns/ColumnArray.h>
++#include <Common/assert_cast.h>
++
++#include <cmath>
++
++
++namespace DB
++{
++
++struct EntropyCountSketchData
++{
++    //int32_t sketch_array[SKETCH_ROWS][SKETCH_COLUMNS];
++    using sketch_t = int32_t;
++    std::vector<std::vector<sketch_t>> sketch_array;
++    uint64_t sketch_total;
++    unsigned int levels, rows, width;
++
++    void add(const IColumn ** columns, size_t row_num, Poco::Logger * /*log*/)
++    {
++        //LOG_WARNING(log, "'add' called in EntropyCountSketchData with row_num {}", row_num);
++        const auto & column = assert_cast<const ColumnArray &>(*columns[0]);
++        Field row_field;
++        column.get(row_num, row_field);
++
++        if (row_num == 0)
++        {
++            Array & arguments = row_field.get<const Array &>();
++            sketch_total = arguments[0].get<const uint64_t &>();
++            levels = static_cast<const unsigned int &>(arguments[1].get<const uint64_t &>());
++            rows = static_cast<const unsigned int &>(arguments[2].get<const uint64_t &>());
++            width = static_cast<const unsigned int &>(arguments[3].get<const uint64_t &>());
++            sketch_array.resize(rows);
++            for(uint32_t i = 0; i < rows; i++)
++            {
++                sketch_array[i].resize(width);
++            }
++            //LOG_WARNING(log, "Count sketch arguments {} {} {}", sketch_total, rows, width);
++        }
++        else
++        {
++            row_num -= 1;
++            for(uint32_t i = 0; i < width; i++)
++            {
++                // TODO: Why is column an Array(long)?
++                Field & column_field = row_field.get<const Array &>()[i];
++                sketch_array[row_num][i] = static_cast<const sketch_t &>(column_field.get<const long &>());
++            }
++        }
++    }
++
++    Float64 get(Poco::Logger * /*log*/) const
++    {
++        Float64 entropy_estimate;
++        std::vector<Float64> entropy_estimates;
++
++        for(uint32_t i = 0; i < rows; i++)
++        {
++            entropy_estimate = 0;
++            for(uint32_t j = 0; j < width; j++)
++            {
++                const int32_t & counter = abs(sketch_array[i][j]);
++                const Float64 & counter_prob = static_cast<Float64>(counter) / static_cast<Float64>(sketch_total);
++                if (counter_prob != 0)
++                {
++                    entropy_estimate += counter_prob * log2(counter_prob);
++                }
++            }
++            entropy_estimate *= -1.0;
++            //LOG_WARNING(log, "row {} entropy estimate {}", i, entropy_estimate);
++            entropy_estimates.push_back(entropy_estimate);
++        }
++        return median(entropy_estimates);
++    }
++};
++
++class AggregateFunctionEntropyCountSketch final : public IAggregateFunctionDataHelper<EntropyCountSketchData, AggregateFunctionEntropyCountSketch>
++{
++private:
++    size_t num_args;
++    Poco::Logger * log;
++
++public:
++    explicit AggregateFunctionEntropyCountSketch(const DataTypes & argument_types_)
++        : IAggregateFunctionDataHelper<EntropyCountSketchData, AggregateFunctionEntropyCountSketch>(argument_types_, {}, createResultType())
++        , num_args(argument_types_.size())
++        , log(&Poco::Logger::get("AggregateFunctionEntropyCountSketch"))
++    {
++        LOG_WARNING(log, "num_args {}", num_args);
++        for(size_t i = 0; i < num_args; i++)
++            LOG_WARNING(log, "arg {} type {}", i, argument_types_[i]->getName());
++    }
++
++    String getName() const override
++    {
++        return "AggregateFunctionEntropyCountSketch_sketch";
++    }
++
++    static DataTypePtr createResultType()
++    {
++        return std::make_shared<DataTypeNumber<Float64>>();
++    }
++    
++    bool allocatesMemoryInArena() const override { return false; }
++
++    void add(AggregateDataPtr __restrict place, const IColumn ** columns, size_t row_num, Arena *) const override
++    {
++        this->data(place).add(columns, row_num, log);
++    }
++    
++    void merge(AggregateDataPtr __restrict /*place*/, ConstAggregateDataPtr /*rhs*/, Arena *) const override
++    {
++        //this->data(place).merge(this->data(rhs));
++    }
++
++    void serialize(ConstAggregateDataPtr __restrict /*place*/, WriteBuffer & /*buf*/, std::optional<size_t> /* version */) const override
++    {
++        //this->data(const_cast<AggregateDataPtr>(place)).serialize(buf);
++    }
++
++    void deserialize(AggregateDataPtr __restrict /*place*/, ReadBuffer & /*buf*/, std::optional<size_t> /* version */, Arena * /* arena */) const override
++    {
++        //this->data(place).deserialize(buf);
++    }
++
++    void insertResultInto(AggregateDataPtr __restrict place, IColumn & to, Arena *) const override
++    {
++        auto & column = assert_cast<ColumnVector<Float64> &>(to);
++        column.getData().push_back(this->data(place).get(log));
++    }
++};
++
++}
+diff --git a/src/AggregateFunctions/sketches/AggregateFunctionEntropyMRAC.cpp b/src/AggregateFunctions/sketches/AggregateFunctionEntropyMRAC.cpp
+new file mode 100644
+index 00000000000..3e8955276c1
+--- /dev/null
++++ b/src/AggregateFunctions/sketches/AggregateFunctionEntropyMRAC.cpp
+@@ -0,0 +1,37 @@
++#include <AggregateFunctions/AggregateFunctionFactory.h>
++#include <AggregateFunctions/sketches/AggregateFunctionEntropyMRAC.h>
++#include <AggregateFunctions/FactoryHelpers.h>
++#include <AggregateFunctions/Helpers.h>
++
++namespace DB
++{
++struct Settings;
++
++namespace ErrorCodes
++{
++    extern const int NUMBER_OF_ARGUMENTS_DOESNT_MATCH;
++}
++
++namespace
++{
++
++AggregateFunctionPtr createAggregateFunctionEntropyMRAC(
++    const std::string & name, const DataTypes & argument_types, const Array & parameters, const Settings *)
++{
++    assertNoParameters(name, parameters);
++    if (argument_types.empty())
++        throw Exception(ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH,
++                        "Incorrect number of arguments for aggregate function {}", name);
++
++    return std::make_shared<AggregateFunctionEntropyMRAC>(argument_types);
++}
++
++}
++
++void registerAggregateFunctionEntropyMRAC(AggregateFunctionFactory & factory)
++{
++    factory.registerFunction("entropy_sketch_mrac", createAggregateFunctionEntropyMRAC);
++}
++
++}
++
+diff --git a/src/AggregateFunctions/sketches/AggregateFunctionEntropyMRAC.h b/src/AggregateFunctions/sketches/AggregateFunctionEntropyMRAC.h
+new file mode 100644
+index 00000000000..9d8d18ceb6a
+--- /dev/null
++++ b/src/AggregateFunctions/sketches/AggregateFunctionEntropyMRAC.h
+@@ -0,0 +1,151 @@
++#pragma once
++
++#include <AggregateFunctions/IAggregateFunction.h>
++#include <DataTypes/DataTypesNumber.h>
++#include <Columns/ColumnVector.h>
++#include <Columns/ColumnArray.h>
++#include <Common/assert_cast.h>
++
++#include <cmath>
++
++namespace DB
++{
++
++//Float64 median(std::vector<Float64> values)
++//{
++//    const size_t & n = values.size();
++//    if (n % 2 == 0)
++//    {
++//		std::nth_element(values.begin(), values.begin() + n / 2, values.end());
++//        std::nth_element(values.begin(), values.begin() + (n - 1) / 2, values.end()); 	
++//		return (values[(n-2) / 2] + values[n / 2]) / 2.0;
++//    }
++//    else
++//    {
++//		std::nth_element(values.begin(), values.begin() + n / 2, values.end());
++//		return values[(n-1) / 2];
++//    }
++//}
++
++struct MRACData
++{
++    using sketch_t = uint32_t;
++    std::vector<std::vector<sketch_t>> sketch_array;
++    uint64_t sketch_total;
++    unsigned int levels, rows, width;
++
++    void add(const IColumn ** columns, size_t row_num, Poco::Logger * /*log*/)
++    {
++        //LOG_WARNING(log, "'add' called in MRACData with row_num {}", row_num);
++        const auto & column = assert_cast<const ColumnArray &>(*columns[0]);
++        Field row_field;
++        column.get(row_num, row_field);
++
++        if (row_num == 0)
++        {
++            Array & arguments = row_field.get<const Array &>();
++            sketch_total = arguments[0].get<const uint64_t &>();
++            levels = static_cast<const unsigned int &>(arguments[1].get<const uint64_t &>());
++            rows = static_cast<const unsigned int &>(arguments[2].get<const uint64_t &>());
++            width = static_cast<const unsigned int &>(arguments[3].get<const uint64_t &>());
++            sketch_array.resize(levels);
++            assert(rows == 1);
++            for(uint32_t i = 0; i < levels; i++)
++            {
++                sketch_array[i].resize(width);
++            }
++        }
++        else
++        {
++            row_num -= 1;
++            unsigned int _level = static_cast<unsigned int>(row_num);
++            for(uint32_t i = 0; i < width; i++)
++            {
++                // TODO: Why is column an Array(long)?
++                Field & column_field = row_field.get<const Array &>()[i];
++                sketch_array[_level][i] = static_cast<const sketch_t &>(column_field.get<const long &>());
++            }
++        }
++    }
++
++    Float64 get(Poco::Logger * /*log*/) const
++    {
++        Float64 entropy_estimate = 0;
++
++        for(uint32_t i = 0; i < levels; i++)
++        {
++            for(uint32_t j = 0; j < width; j++)
++            {
++                // no need of abs as sketch_t is unsigned
++                const uint32_t & counter = sketch_array[i][j];
++                const Float64 & counter_prob = static_cast<Float64>(counter) / static_cast<Float64>(sketch_total);
++                if (counter_prob != 0)
++                {
++                    entropy_estimate += counter_prob * log2(counter_prob);
++                }
++            }
++        }
++        entropy_estimate *= -1.0;
++        
++        return entropy_estimate;
++    }
++};
++
++class AggregateFunctionEntropyMRAC final : public IAggregateFunctionDataHelper<MRACData, AggregateFunctionEntropyMRAC>
++{
++private:
++    size_t num_args;
++    Poco::Logger * log;
++
++public:
++    explicit AggregateFunctionEntropyMRAC(const DataTypes & argument_types_)
++        : IAggregateFunctionDataHelper<MRACData, AggregateFunctionEntropyMRAC>(argument_types_, {}, createResultType())
++        , num_args(argument_types_.size())
++        , log(&Poco::Logger::get("AggregateFunctionEntropyMRAC"))
++    {
++        LOG_WARNING(log, "num_args {}", num_args);
++        for(size_t i = 0; i < num_args; i++)
++            LOG_WARNING(log, "arg {} type {}", i, argument_types_[i]->getName());
++    }
++
++    String getName() const override
++    {
++        return "AggregateFunctionEntropyMRAC_sketch";
++    }
++
++    static DataTypePtr createResultType()
++    {
++        return std::make_shared<DataTypeNumber<Float64>>();
++    }
++    
++    bool allocatesMemoryInArena() const override { return false; }
++
++    void add(AggregateDataPtr __restrict place, const IColumn ** columns, size_t row_num, Arena *) const override
++    {
++        this->data(place).add(columns, row_num, log);
++    }
++    
++    void merge(AggregateDataPtr __restrict /*place*/, ConstAggregateDataPtr /*rhs*/, Arena *) const override
++    {
++        //this->data(place).merge(this->data(rhs));
++    }
++
++    void serialize(ConstAggregateDataPtr __restrict /*place*/, WriteBuffer & /*buf*/, std::optional<size_t> /* version */) const override
++    {
++        //this->data(const_cast<AggregateDataPtr>(place)).serialize(buf);
++    }
++
++    void deserialize(AggregateDataPtr __restrict /*place*/, ReadBuffer & /*buf*/, std::optional<size_t> /* version */, Arena * /* arena */) const override
++    {
++        //this->data(place).deserialize(buf);
++    }
++
++    void insertResultInto(AggregateDataPtr __restrict place, IColumn & to, Arena *) const override
++    {
++        auto & column = assert_cast<ColumnVector<Float64> &>(to);
++        column.getData().push_back(this->data(place).get(log));
++    }
++};
++
++}
++
+diff --git a/src/AggregateFunctions/sketches/AggregateFunctionHeavyHitterCardinalitiesCountSketch.cpp b/src/AggregateFunctions/sketches/AggregateFunctionHeavyHitterCardinalitiesCountSketch.cpp
+new file mode 100644
+index 00000000000..8122f41ec72
+--- /dev/null
++++ b/src/AggregateFunctions/sketches/AggregateFunctionHeavyHitterCardinalitiesCountSketch.cpp
+@@ -0,0 +1,38 @@
++#include <AggregateFunctions/AggregateFunctionFactory.h>
++#include <AggregateFunctions/sketches/AggregateFunctionHeavyHitterCardinalitiesCountSketch.h>
++#include <AggregateFunctions/FactoryHelpers.h>
++#include <AggregateFunctions/Helpers.h>
++
++namespace DB
++{
++struct Settings;
++
++namespace ErrorCodes
++{
++    extern const int NUMBER_OF_ARGUMENTS_DOESNT_MATCH;
++}
++
++namespace
++{
++
++AggregateFunctionPtr createAggregateFunctionHeavyHitterCardinalitiesCountSketch(
++    const std::string & name, const DataTypes & argument_types, const Array & parameters, const Settings *)
++{
++    assertNoParameters(name, parameters);
++    // TODO: need one parameters which is heavy hitter size
++    if (argument_types.empty())
++        throw Exception(ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH,
++                        "Incorrect number of arguments for aggregate function {}", name);
++
++    return std::make_shared<AggregateFunctionHeavyHitterCardinalitiesCountSketch>(argument_types);
++}
++
++}
++
++void registerAggregateFunctionHeavyHitterCardinalitiesCountSketch(AggregateFunctionFactory & factory)
++{
++    factory.registerFunction("heavy_hitter_cardinalities_sketch_cs", createAggregateFunctionHeavyHitterCardinalitiesCountSketch);
++}
++
++}
++
+diff --git a/src/AggregateFunctions/sketches/AggregateFunctionHeavyHitterCardinalitiesCountSketch.h b/src/AggregateFunctions/sketches/AggregateFunctionHeavyHitterCardinalitiesCountSketch.h
+new file mode 100644
+index 00000000000..9c98ad902a3
+--- /dev/null
++++ b/src/AggregateFunctions/sketches/AggregateFunctionHeavyHitterCardinalitiesCountSketch.h
+@@ -0,0 +1,158 @@
++#pragma once
++
++#include <AggregateFunctions/IAggregateFunction.h>
++#include <AggregateFunctions/sketches/Utils.h>
++#include <DataTypes/DataTypesNumber.h>
++#include <Columns/ColumnVector.h>
++#include <Columns/ColumnArray.h>
++#include <Common/assert_cast.h>
++
++#include <cmath>
++
++#include <xxhash.h>
++
++namespace DB
++{
++
++struct HeavyHitterCardinalitiesCountSketchData
++{
++    using sketch_t = int32_t;
++    using flowkey_t = uint64_t;
++
++    std::vector<std::vector<sketch_t>> sketch_array;
++    std::vector<std::pair<flowkey_t, Float64>> flowkey_storage;
++    uint64_t sketch_total;
++    unsigned int levels, rows, width;
++    unsigned int flowkey_storage_size;
++
++    void add(const IColumn ** columns, size_t row_num, Poco::Logger * /*log*/)
++    {
++        // first column
++        const auto & column1 = assert_cast<const ColumnArray &>(*columns[0]);
++        Field row_field;
++        column1.get(row_num, row_field);
++
++        if (row_num == 0)
++        {
++            Array & arguments = row_field.get<const Array &>();
++            sketch_total = arguments[0].get<const uint64_t &>();
++            levels = static_cast<const unsigned int &>(arguments[1].get<const uint64_t &>());
++            rows = static_cast<const unsigned int &>(arguments[2].get<const uint64_t &>());
++            width = static_cast<const unsigned int &>(arguments[3].get<const uint64_t &>());
++            flowkey_storage_size = static_cast<const unsigned int &>(arguments[4].get<const uint64_t &>());
++            sketch_array.resize(rows);
++            for(uint32_t i = 0; i < rows; i++)
++            {
++                sketch_array[i].resize(width);
++            }
++            //LOG_WARNING(log, "Count sketch arguments {} {} {}", sketch_total, rows, width);
++        }
++        else
++        {
++            if (row_num - 1 < rows)
++            {
++                for(uint32_t i = 0; i < width; i++)
++                {
++                    // TODO: Why is column an Array(long)?
++                    Field & column_field = row_field.get<const Array &>()[i];
++                    sketch_array[row_num - 1][i] = static_cast<const sketch_t &>(column_field.get<const long &>());
++                }
++            }
++        }
++
++        // process second and third column
++        const auto & column2 = assert_cast<const ColumnVector<UInt64> &>(*columns[1]);
++        const auto & column3 = assert_cast<const ColumnVector<Float64> &>(*columns[2]);
++        Field row_field2, row_field3;
++        column2.get(row_num, row_field2);
++        column3.get(row_num, row_field3);
++        const flowkey_t flowkey = row_field2.get<const flowkey_t &>();
++        const Float64 flowkey_estimate = row_field3.get<const Float64 &>();
++
++        flowkey_storage.push_back(std::make_pair(flowkey, flowkey_estimate));
++    }
++
++    Float64 get(Poco::Logger * /*log*/, unsigned int row_num) const
++    {
++        // TODO: since we don't need this, can we just remove the 3rd column?
++        //return flowkey_storage[row_num].second;
++        const flowkey_t & flowkey = flowkey_storage[row_num].first;
++
++		int32_t increment;
++        uint32_t sketch_column_index;
++        std::vector<int32_t> estimates(rows);
++
++        for (uint32_t sketch_row_index = 0; sketch_row_index < rows; sketch_row_index++)
++        {
++            increment = XXH32(static_cast<const void*>(&flowkey), sizeof(flowkey), sketch_row_index + rows) % 2;
++            increment = increment * 2 - 1;
++            sketch_column_index = XXH32(static_cast<const void*>(&flowkey), sizeof(flowkey), sketch_row_index) % width;
++            //estimates.push_back(sketch_array[sketch_row_index][sketch_column_index] * increment);
++            estimates[sketch_row_index] = sketch_array[sketch_row_index][sketch_column_index] * increment;
++        }
++
++        return median(estimates);
++    }
++};
++
++class AggregateFunctionHeavyHitterCardinalitiesCountSketch final : public IAggregateFunctionDataHelper<HeavyHitterCardinalitiesCountSketchData, AggregateFunctionHeavyHitterCardinalitiesCountSketch>
++{
++private:
++    size_t num_args;
++    Poco::Logger * log;
++
++public:
++    explicit AggregateFunctionHeavyHitterCardinalitiesCountSketch(const DataTypes & argument_types_)
++        : IAggregateFunctionDataHelper<HeavyHitterCardinalitiesCountSketchData, AggregateFunctionHeavyHitterCardinalitiesCountSketch>(argument_types_, {}, createResultType())
++        , num_args(argument_types_.size())
++        , log(&Poco::Logger::get("AggregateFunctionHeavyHitterCardinalitiesCountSketch"))
++    {
++        LOG_WARNING(log, "num_args {}", num_args);
++        for(size_t i = 0; i < num_args; i++)
++            LOG_WARNING(log, "arg {} type {}", i, argument_types_[i]->getName());
++    }
++
++    String getName() const override
++    {
++        return "AggregateFunctionHeavyHitterCardinalitiesCountSketch_sketch";
++    }
++
++    static DataTypePtr createResultType()
++    {
++        return std::make_shared<DataTypeNumber<Float64>>();
++    }
++    
++    bool allocatesMemoryInArena() const override { return false; }
++
++    void add(AggregateDataPtr __restrict place, const IColumn ** columns, size_t row_num, Arena *) const override
++    {
++        this->data(place).add(columns, row_num, log);
++    }
++    
++    void merge(AggregateDataPtr __restrict /*place*/, ConstAggregateDataPtr /*rhs*/, Arena *) const override
++    {
++        //this->data(place).merge(this->data(rhs));
++    }
++
++    void serialize(ConstAggregateDataPtr __restrict /*place*/, WriteBuffer & /*buf*/, std::optional<size_t> /* version */) const override
++    {
++        //this->data(const_cast<AggregateDataPtr>(place)).serialize(buf);
++    }
++
++    void deserialize(AggregateDataPtr __restrict /*place*/, ReadBuffer & /*buf*/, std::optional<size_t> /* version */, Arena * /* arena */) const override
++    {
++        //this->data(place).deserialize(buf);
++    }
++
++    void insertResultInto(AggregateDataPtr __restrict place, IColumn & to, Arena *) const override
++    {
++        // TODO: column data type
++        auto & column = assert_cast<ColumnVector<Float64> &>(to);
++        for(unsigned int i = 0; i < this->data(place).flowkey_storage_size; i++)
++        {
++            column.getData().push_back(this->data(place).get(log, i));
++        }
++    }
++};
++
++}
+diff --git a/src/AggregateFunctions/sketches/AggregateFunctionHeavyHitterFlowkeysCountSketch.cpp b/src/AggregateFunctions/sketches/AggregateFunctionHeavyHitterFlowkeysCountSketch.cpp
+new file mode 100644
+index 00000000000..addfe57f502
+--- /dev/null
++++ b/src/AggregateFunctions/sketches/AggregateFunctionHeavyHitterFlowkeysCountSketch.cpp
+@@ -0,0 +1,38 @@
++#include <AggregateFunctions/AggregateFunctionFactory.h>
++#include <AggregateFunctions/sketches/AggregateFunctionHeavyHitterFlowkeysCountSketch.h>
++#include <AggregateFunctions/FactoryHelpers.h>
++#include <AggregateFunctions/Helpers.h>
++
++namespace DB
++{
++struct Settings;
++
++namespace ErrorCodes
++{
++    extern const int NUMBER_OF_ARGUMENTS_DOESNT_MATCH;
++}
++
++namespace
++{
++
++AggregateFunctionPtr createAggregateFunctionHeavyHitterFlowkeysCountSketch(
++    const std::string & name, const DataTypes & argument_types, const Array & parameters, const Settings *)
++{
++    assertNoParameters(name, parameters);
++    // TODO: need one parameters which is heavy hitter size
++    if (argument_types.empty())
++        throw Exception(ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH,
++                        "Incorrect number of arguments for aggregate function {}", name);
++
++    return std::make_shared<AggregateFunctionHeavyHitterFlowkeysCountSketch>(argument_types);
++}
++
++}
++
++void registerAggregateFunctionHeavyHitterFlowkeysCountSketch(AggregateFunctionFactory & factory)
++{
++    factory.registerFunction("heavy_hitter_flowkeys_sketch_cs", createAggregateFunctionHeavyHitterFlowkeysCountSketch);
++}
++
++}
++
+diff --git a/src/AggregateFunctions/sketches/AggregateFunctionHeavyHitterFlowkeysCountSketch.h b/src/AggregateFunctions/sketches/AggregateFunctionHeavyHitterFlowkeysCountSketch.h
+new file mode 100644
+index 00000000000..d51f7084186
+--- /dev/null
++++ b/src/AggregateFunctions/sketches/AggregateFunctionHeavyHitterFlowkeysCountSketch.h
+@@ -0,0 +1,139 @@
++#pragma once
++
++#include <AggregateFunctions/IAggregateFunction.h>
++#include <AggregateFunctions/sketches/Utils.h>
++#include <DataTypes/DataTypesNumber.h>
++#include <Columns/ColumnVector.h>
++#include <Columns/ColumnArray.h>
++#include <Common/assert_cast.h>
++
++#include <cmath>
++
++namespace DB
++{
++
++struct HeavyHitterFlowkeysCountSketchData
++{
++    using sketch_t = int32_t;
++    using flowkey_t = uint64_t;
++    
++    std::vector<std::vector<sketch_t>> sketch_array;
++    std::vector<std::pair<flowkey_t, Float64>> flowkey_storage;
++    uint64_t sketch_total;
++    unsigned int levels, rows, width;
++    unsigned int flowkey_storage_size;
++
++    void add(const IColumn ** columns, size_t row_num, Poco::Logger * /*log*/)
++    {
++        // first column
++        const auto & column1 = assert_cast<const ColumnArray &>(*columns[0]);
++        Field row_field;
++        column1.get(row_num, row_field);
++
++        if (row_num == 0)
++        {
++            Array & arguments = row_field.get<const Array &>();
++            sketch_total = arguments[0].get<const uint64_t &>();
++            levels = static_cast<const unsigned int &>(arguments[1].get<const uint64_t &>());
++            rows = static_cast<const unsigned int &>(arguments[2].get<const uint64_t &>());
++            width = static_cast<const unsigned int &>(arguments[3].get<const uint64_t &>());
++            flowkey_storage_size = static_cast<const unsigned int &>(arguments[4].get<const uint64_t &>());
++            sketch_array.resize(rows);
++            for(uint32_t i = 0; i < rows; i++)
++            {
++                sketch_array[i].resize(width);
++            }
++            //LOG_WARNING(log, "Count sketch arguments {} {} {}", sketch_total, rows, width);
++        }
++        else
++        {
++            if (row_num - 1 < rows)
++            {
++                for(uint32_t i = 0; i < width; i++)
++                {
++                    // TODO: Why is column an Array(long)?
++                    Field & column_field = row_field.get<const Array &>()[i];
++                    sketch_array[row_num - 1][i] = static_cast<const sketch_t &>(column_field.get<const long &>());
++                }
++            }
++        }
++        
++        // process second and third column
++        const auto & column2 = assert_cast<const ColumnVector<UInt64> &>(*columns[1]);
++        const auto & column3 = assert_cast<const ColumnVector<Float64> &>(*columns[2]);
++        Field row_field2, row_field3;
++        column2.get(row_num, row_field2);
++        column3.get(row_num, row_field3);
++        const flowkey_t flowkey = row_field2.get<const flowkey_t &>();
++        const Float64 flowkey_estimate = row_field3.get<const Float64 &>();
++
++        flowkey_storage.push_back(std::make_pair(flowkey, flowkey_estimate));
++    }
++
++    Float64 get(Poco::Logger * /*log*/, unsigned int row_num) const
++    {
++        return flowkey_storage[row_num].first;
++    }
++};
++
++class AggregateFunctionHeavyHitterFlowkeysCountSketch final : public IAggregateFunctionDataHelper<HeavyHitterFlowkeysCountSketchData, AggregateFunctionHeavyHitterFlowkeysCountSketch>
++{
++private:
++    size_t num_args;
++    Poco::Logger * log;
++
++public:
++    explicit AggregateFunctionHeavyHitterFlowkeysCountSketch(const DataTypes & argument_types_)
++        : IAggregateFunctionDataHelper<HeavyHitterFlowkeysCountSketchData, AggregateFunctionHeavyHitterFlowkeysCountSketch>(argument_types_, {}, createResultType())
++        , num_args(argument_types_.size())
++        , log(&Poco::Logger::get("AggregateFunctionHeavyHitterFlowkeysCountSketch"))
++    {
++        LOG_WARNING(log, "num_args {}", num_args);
++        for(size_t i = 0; i < num_args; i++)
++            LOG_WARNING(log, "arg {} type {}", i, argument_types_[i]->getName());
++    }
++
++    String getName() const override
++    {
++        return "AggregateFunctionHeavyHitterFlowkeysCountSketch_sketch";
++    }
++
++    static DataTypePtr createResultType()
++    {
++        return std::make_shared<DataTypeNumber<Float64>>();
++    }
++    
++    bool allocatesMemoryInArena() const override { return false; }
++
++    void add(AggregateDataPtr __restrict place, const IColumn ** columns, size_t row_num, Arena *) const override
++    {
++        this->data(place).add(columns, row_num, log);
++    }
++    
++    void merge(AggregateDataPtr __restrict /*place*/, ConstAggregateDataPtr /*rhs*/, Arena *) const override
++    {
++        //this->data(place).merge(this->data(rhs));
++    }
++
++    void serialize(ConstAggregateDataPtr __restrict /*place*/, WriteBuffer & /*buf*/, std::optional<size_t> /* version */) const override
++    {
++        //this->data(const_cast<AggregateDataPtr>(place)).serialize(buf);
++    }
++
++    void deserialize(AggregateDataPtr __restrict /*place*/, ReadBuffer & /*buf*/, std::optional<size_t> /* version */, Arena * /* arena */) const override
++    {
++        //this->data(place).deserialize(buf);
++    }
++
++    void insertResultInto(AggregateDataPtr __restrict place, IColumn & to, Arena *) const override
++    {
++        // TODO: column data type
++        auto & column = assert_cast<ColumnVector<Float64> &>(to);
++        for(unsigned int i = 0; i < this->data(place).flowkey_storage_size; i++)
++        {
++            column.getData().push_back(this->data(place).get(log, i));
++        }
++    }
++};
++
++}
+diff --git a/src/AggregateFunctions/sketches/README.md b/src/AggregateFunctions/sketches/README.md
+new file mode 100644
+index 00000000000..a1a60346bb8
+--- /dev/null
++++ b/src/AggregateFunctions/sketches/README.md
+@@ -0,0 +1 @@
++This directory has the control plane code for various sketches
+diff --git a/src/AggregateFunctions/sketches/Utils.h b/src/AggregateFunctions/sketches/Utils.h
+new file mode 100644
+index 00000000000..5cc528b2033
+--- /dev/null
++++ b/src/AggregateFunctions/sketches/Utils.h
+@@ -0,0 +1,23 @@
++#pragma once
++
++#include <base/types.h>
++
++namespace DB
++{
++
++template <typename T>
++Float64 median(std::vector<T> values)
++{
++    const size_t & n = values.size();
++    std::sort(values.begin(), values.end());
++    if (n % 2 == 0)
++    {
++		return static_cast<Float64>(values[(n-2) / 2] + values[n / 2]) / 2.0;
++    }
++    else
++    {
++		return static_cast<Float64>(values[(n-1) / 2]);
++    }
++}
++
++}
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 0257b7d329b..d6284f4cae3 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -61,6 +61,7 @@ add_subdirectory (QueryPipeline)
+ add_subdirectory (DataTypes)
+ add_subdirectory (Dictionaries)
+ add_subdirectory (Disks)
++add_subdirectory (Sketches)
+ add_subdirectory (Storages)
+ add_subdirectory (Parsers)
+ add_subdirectory (IO)
+diff --git a/src/Columns/ColumnArray.cpp b/src/Columns/ColumnArray.cpp
+index 1cb8188bce6..9bb80f6f4b1 100644
+--- a/src/Columns/ColumnArray.cpp
++++ b/src/Columns/ColumnArray.cpp
+@@ -40,7 +40,9 @@ namespace ErrorCodes
+   *  SELECT range(10000000)
+   * will take less than 500ms on your machine.
+   */
+-static constexpr size_t max_array_size_as_field = 1000000;
++//static constexpr size_t max_array_size_as_field = 1000000;
++// MILIND
++static constexpr size_t max_array_size_as_field = 10000000;
+ 
+ 
+ ColumnArray::ColumnArray(MutableColumnPtr && nested_column, MutableColumnPtr && offsets_column)
+diff --git a/src/Common/ErrorCodes.cpp b/src/Common/ErrorCodes.cpp
+index 8e0d7fabf6b..754316a1a13 100644
+--- a/src/Common/ErrorCodes.cpp
++++ b/src/Common/ErrorCodes.cpp
+@@ -591,6 +591,7 @@
+     M(1000, POCO_EXCEPTION) \
+     M(1001, STD_EXCEPTION) \
+     M(1002, UNKNOWN_EXCEPTION) \
++    M(1003, UNKNOWN_SKETCH) \
+ /* See END */
+ 
+ #ifdef APPLY_FOR_EXTERNAL_ERROR_CODES
+diff --git a/src/Core/Settings.h b/src/Core/Settings.h
+index 5c41c0b0829..ee4fa65442f 100644
+--- a/src/Core/Settings.h
++++ b/src/Core/Settings.h
+@@ -817,6 +817,7 @@ class IColumn;
+     M(Bool, create_index_ignore_unique, false, "Ignore UNIQUE keyword in CREATE UNIQUE INDEX. Made for SQL compatibility tests.", 0) \
+     M(Bool, print_pretty_type_names, false, "Print pretty type names in DESCRIBE query and toTypeName() function", 0) \
+     M(Bool, create_table_empty_primary_key_by_default, false, "Allow to create *MergeTree tables with empty primary key when ORDER BY and PRIMARY KEY not specified", 0) \
++    M(Bool, use_sketchdb, false, "Use Milind's SketchDB framework", 0) \
+ 
+ // End of COMMON_SETTINGS
+ // Please add settings related to formats into the FORMAT_FACTORY_SETTINGS, move obsolete settings to OBSOLETE_SETTINGS and obsolete format settings to OBSOLETE_FORMAT_SETTINGS.
+diff --git a/src/Interpreters/InterpreterSelectQuery.cpp b/src/Interpreters/InterpreterSelectQuery.cpp
+index c32b593a084..680b16b8811 100644
+--- a/src/Interpreters/InterpreterSelectQuery.cpp
++++ b/src/Interpreters/InterpreterSelectQuery.cpp
+@@ -368,6 +368,43 @@ InterpreterSelectQuery::InterpreterSelectQuery(
+         prepared_sets_)
+ {}
+ 
++void InterpreterSelectQuery::addSketchToQueryPtr()
++{
++    auto query = getSelectQuery().select();
++    auto & elements = query->children;
++    for (unsigned int i = 0; i < elements.size(); i++)
++    {
++        if (elements[i]->as<ASTFunction>())
++        {
++            auto element = elements[i]->as<ASTFunction>();
++            String name = element->name;
++            // if "sketches" is present in name
++            if (name.find("_sketch") != String::npos)
++            {
++                //LOG_WARNING(log, "original name: {}", name);
++                //LOG_WARNING(log, "original arguments {} {}", element->arguments->getID(), element->arguments->children.size());
++                auto arguments = element->arguments->children;
++                // find the substring before "_sketch"
++                String metric_name = name.substr(0, name.find("_sketch"));
++                // lookup metric_name in storage->sketch_cp_configuration_map
++                String sketch_name = storage->lookupSketchName(metric_name);
++                if (sketch_name == "")
++                {
++                    LOG_WARNING(log, "Did not find sketch for metric {}", metric_name);
++                    continue;
++                }
++                //LOG_WARNING(log, "Found sketch name {} for metric name {}", sketch_name, metric_name);
++                // create ASTFunction with name sketch_name
++                auto sketch_function = makeASTFunction(name + "_" + sketch_name, arguments);
++                //LOG_WARNING(log, "new name: {}", sketch_function->name);
++                //LOG_WARNING(log, "new arguments {} {}", sketch_function->arguments->getID(), sketch_function->arguments->children.size());
++                elements[i] = sketch_function;
++                added_sketch_to_query_ptr = true;
++            }
++        }
++    }
++}
++
+ InterpreterSelectQuery::InterpreterSelectQuery(
+     const ASTPtr & query_ptr_,
+     const ContextMutablePtr & context_,
+@@ -377,6 +414,7 @@ InterpreterSelectQuery::InterpreterSelectQuery(
+     const Names & required_result_column_names,
+     const StorageMetadataPtr & metadata_snapshot_,
+     PreparedSetsPtr prepared_sets_)
++    // MILIND
+     /// NOTE: the query almost always should be cloned because it will be modified during analysis.
+     : IInterpreterUnionOrSelectQuery(options_.modify_inplace ? query_ptr_ : query_ptr_->clone(), context_, options_)
+     , storage(storage_)
+@@ -442,6 +480,12 @@ InterpreterSelectQuery::InterpreterSelectQuery(
+         got_storage_from_query = true;
+     }
+ 
++    // MILIND
++    if (storage) 
++    {
++        addSketchToQueryPtr();
++    }
++
+     if (storage)
+     {
+         table_lock = storage->lockForShare(context->getInitialQueryId(), context->getSettingsRef().lock_acquire_timeout);
+@@ -2567,6 +2611,24 @@ void InterpreterSelectQuery::executeFetchColumns(QueryProcessingStage::Enum proc
+         query_info.storage_limits = std::make_shared<StorageLimitsList>(storage_limits);
+ 
+         query_info.settings_limit_offset_done = options.settings_limit_offset_done;
++        // MILIND
++        // if there is an aggregate function that contains the substring "sketch" and sketchdb is enabled, enable read_from_sketch
++        AggregateDescriptions aggregates = query_analyzer->aggregates();
++        for(const auto & aggregate : aggregates)
++        {
++            if (settings.use_sketchdb && aggregate.function->getName().find("_sketch") != String::npos)
++            {
++                storage->enableReadFromSketch();
++                LOG_WARNING(log, "enabled read from sketch");
++                // MILIND: re-read storage snapshot after enableReadFromSketch()
++                if (options.only_analyze)
++                    storage_snapshot = storage->getStorageSnapshotWithoutData(metadata_snapshot, context);
++                else
++                    storage_snapshot = storage->getStorageSnapshotForQuery(metadata_snapshot, query_ptr, context);
++                LOG_WARNING(log, "re-read snapshot");
++                // TODO: when/where should we disableReadFromSketch()?
++            }
++        }
+         storage->read(query_plan, required_columns, storage_snapshot, query_info, context, processing_stage, max_block_size, max_streams);
+ 
+         if (context->hasQueryContext() && !options.is_internal)
+diff --git a/src/Interpreters/InterpreterSelectQuery.h b/src/Interpreters/InterpreterSelectQuery.h
+index 7c2555deaa7..0955cc57ff4 100644
+--- a/src/Interpreters/InterpreterSelectQuery.h
++++ b/src/Interpreters/InterpreterSelectQuery.h
+@@ -255,6 +255,10 @@ private:
+ 
+     /// Reuse already built sets for multiple passes of analysis, possibly across interpreters.
+     PreparedSetsPtr prepared_sets;
++
++    // MILIND
++    void addSketchToQueryPtr();
++    bool added_sketch_to_query_ptr = false;
+ };
+ 
+ }
+diff --git a/src/Sketches/CMakeLists.txt b/src/Sketches/CMakeLists.txt
+new file mode 100644
+index 00000000000..cc403a0f8e8
+--- /dev/null
++++ b/src/Sketches/CMakeLists.txt
+@@ -0,0 +1,20 @@
++include("${ClickHouse_SOURCE_DIR}/cmake/dbms_glob_sources.cmake")
++add_headers_and_sources(clickhouse_sketches .)
++
++#list(REMOVE_ITEM clickhouse_sketches_sources registerSketches.cpp)
++#list(REMOVE_ITEM clickhouse_sketches_sources SketchFactory.cpp)
++#list(REMOVE_ITEM clickhouse_sketches_headers registerSketches.h)
++#list(REMOVE_ITEM clickhouse_sketches_headers SketchFactory.h)
++
++extract_into_parent_list(clickhouse_sketches_sources dbms_sources
++    ISketch.cpp
++    SketchFactory.cpp
++)
++
++extract_into_parent_list(clickhouse_sketches_headers dbms_headers
++    ISketch.h
++    SketchFactory.h
++)
++
++add_library(clickhouse_sketches ${clickhouse_sketches_headers} ${clickhouse_sketches_sources})
++target_link_libraries(clickhouse_sketches PRIVATE dbms PUBLIC ch_contrib::xxHash)
+diff --git a/src/Sketches/Config.h b/src/Sketches/Config.h
+new file mode 100644
+index 00000000000..08eff27d7ed
+--- /dev/null
++++ b/src/Sketches/Config.h
+@@ -0,0 +1,13 @@
++#pragma once
++
++#include <string>
++#include <unordered_map>
++
++namespace DB
++{
++    //const std::unordered_map<std::string, std::string> sketch_datatype_map = {
++    //    {"cs", "Array(Int32)"},
++    //    {"cm", "Array(UInt32)"},
++    //    {"mrac", "Array(UInt32)"}
++    //};
++}
+diff --git a/src/Sketches/CountMin.cpp b/src/Sketches/CountMin.cpp
+new file mode 100644
+index 00000000000..31a89b37706
+--- /dev/null
++++ b/src/Sketches/CountMin.cpp
+@@ -0,0 +1,192 @@
++#include <Sketches/CountMin.h>
++#include <Sketches/SketchFactory.h>
++#include <DataTypes/DataTypeFactory.h>
++
++#include <algorithm>
++
++#include <xxhash.h>
++
++namespace DB
++{
++
++CountMin::CountMin(unsigned int /*_levels*/, unsigned int _rows, unsigned int _width)
++    : ISketch("CountMin")
++{
++    rows = _rows;
++    width = _width;
++    sketch_counters.resize(rows);
++    for(uint32_t i = 0; i < rows; i++)
++    {
++        sketch_counters[i].resize(width);
++    }
++    flowkey_storage_size = 100;
++}
++
++void CountMin::update(flowkey_t flowkey)
++{
++    Float64 estimate = updateCounters(flowkey);
++    updateFlowkeyStorage(flowkey, estimate);
++}
++
++Float64 CountMin::updateCounters(flowkey_t flowkey)
++{
++    uint32_t sketch_column_index;
++    std::vector<uint32_t> estimates(rows);
++
++    for (uint32_t sketch_row_index = 0; sketch_row_index < rows; sketch_row_index++)
++    {
++        sketch_column_index = XXH32(static_cast<const void*>(&flowkey), sizeof(flowkey), sketch_row_index) % width;
++        sketch_counters[sketch_row_index][sketch_column_index] += 1;
++        estimates.push_back(sketch_counters[sketch_row_index][sketch_column_index]);
++    }
++
++    return static_cast<Float64>(*std::min_element(estimates.begin(), estimates.end()));
++}
++
++void CountMin::updateFlowkeyStorage(flowkey_t flowkey, Float64 estimate)
++{
++    if (flowkey_storage.size() < flowkey_storage_size)
++    {
++        flowkey_storage.emplace(flowkey, estimate);
++    }
++    else
++    {
++        auto it = std::find_if(flowkey_storage.begin(), flowkey_storage.end(), [flowkey](const std::pair<flowkey_t, uint32_t> & pair) {return pair.first == flowkey;});
++        if (it != flowkey_storage.end())
++        {
++            flowkey_storage.erase(it);
++            flowkey_storage.emplace(flowkey, estimate);
++        }
++        else
++        {
++            Float64 least_element = flowkey_storage.begin()->second;
++            if (estimate < least_element)
++            {
++                return;
++            }
++            else
++            {
++                flowkey_storage.erase(flowkey_storage.begin());
++                flowkey_storage.emplace(flowkey, estimate);
++            }
++        }
++    }
++}
++
++void CountMin::insertSketchCountersIntoColumn(MutableColumnPtr & column) const
++{
++    for(uint32_t i = 0; i < rows; i++)
++    {
++        Array row_array(width);
++        std::transform(
++            sketch_counters[i].cbegin(), sketch_counters[i].cend(), row_array.begin(),
++            [](sketch_t value) {return Field(value);}
++        );
++        column->insert(Field(row_array));
++        //LOG_WARNING(log, "row_array size {}", row_array.size());
++    }
++}
++
++unsigned int CountMin::getNumberOfColumns(String query_name) const
++{
++    if (query_name == "entropy")
++    {
++        return 1;
++    }
++    else if (query_name.find("heavy_hitter") != String::npos)
++    {
++        return 3;
++    }
++    assert(false);
++    return 0;
++}
++
++DataTypePtr CountMin::getColumnType(unsigned int column_idx) const
++{
++    if (column_idx == 0)
++    {
++        return DataTypeFactory::instance().get("Array(Int32)");
++    }
++    else if (column_idx == 1)
++    {
++        return DataTypeFactory::instance().get("UInt64");
++    }
++    else if (column_idx == 2)
++    {
++        return DataTypeFactory::instance().get("Float64");
++    }
++    assert(false);
++    return nullptr;
++}
++
++unsigned int CountMin::getNumberOfRows(unsigned int column_idx) const
++{
++    if (column_idx == 0)
++    {
++        return rows + 1;
++    }
++    else if (column_idx == 1 || column_idx == 2)
++    {
++        return flowkey_storage_size;
++    }
++    assert(false);
++    return 0;
++}
++
++void CountMin::insertIntoColumn(MutableColumnPtr & column, unsigned int column_idx, uint64_t sketch_total) const
++{
++    if (column_idx == 0)
++    {
++        insertArgumentsIntoColumn(column, sketch_total);
++        insertSketchCountersIntoColumn(column);
++    }
++    else if (column_idx == 1)
++    {
++        insertFlowkeysIntoColumn(column);
++    }
++    else if (column_idx == 2)
++    {
++        insertFlowkeyEstimatesIntoColumn(column);
++    }
++    else
++    {
++        assert(false);
++    }
++}
++
++void CountMin::insertArgumentsIntoColumn(MutableColumnPtr & column, uint64_t sketch_total) const
++{
++	Array sketch_arguments_array(5);
++	sketch_arguments_array[0] = Field(sketch_total);
++	sketch_arguments_array[1] = Field(1);
++	sketch_arguments_array[2] = Field(rows);
++	sketch_arguments_array[3] = Field(width);
++	sketch_arguments_array[4] = Field(flowkey_storage_size);
++	column->insert(Field(sketch_arguments_array));
++}
++
++void CountMin::insertFlowkeysIntoColumn(MutableColumnPtr & column) const
++{
++    for (auto it = flowkey_storage.begin(); it != flowkey_storage.end(); it++)
++    {
++        column->insert(Field(it->first));
++    }
++}
++
++void CountMin::insertFlowkeyEstimatesIntoColumn(MutableColumnPtr & column) const
++{
++    for (auto it = flowkey_storage.begin(); it != flowkey_storage.end(); it++)
++    {
++        column->insert(Field(it->second));
++    }
++}
++
++void registerCountMin(SketchFactory & factory)
++{
++    factory.registerSketch("cm", [](const SketchFactory::Arguments & args)
++    {
++        return std::make_shared<CountMin>(args.levels, args.rows, args.width);
++    });
++}
++
++}
+diff --git a/src/Sketches/CountMin.h b/src/Sketches/CountMin.h
+new file mode 100644
+index 00000000000..baec02027c4
+--- /dev/null
++++ b/src/Sketches/CountMin.h
+@@ -0,0 +1,55 @@
++#pragma once
++
++#include <queue>
++
++#include <Sketches/ISketch.h>
++
++namespace DB
++{
++
++class CountMin : public ISketch
++{
++private:
++    using sketch_t = uint32_t;
++    unsigned int rows;
++    unsigned int width;
++    std::vector<std::vector<sketch_t>> sketch_counters;
++	// flowkey storage
++    unsigned int flowkey_storage_size;
++    // define comparator for flowkey_storage that compares the second element of the pair
++    struct CompareSecond
++    {
++        bool operator()(const std::pair<flowkey_t, Float64>& left, const std::pair<flowkey_t, Float64>& right) const
++        {
++            return left.second > right.second;
++        }
++    };
++    std::set<std::pair<flowkey_t, Float64>, CompareSecond> flowkey_storage;
++
++public:
++    CountMin(unsigned int /*_levels*/, unsigned int _rows, unsigned int _width);
++
++    virtual long getSize() const override { return rows * width; }
++
++    virtual void update(flowkey_t flowkey) override;
++
++    Float64 updateCounters(flowkey_t flowkey);
++
++    void updateFlowkeyStorage(flowkey_t flowkey, Float64 estimate);
++    
++    virtual unsigned int getNumberOfColumns(String query_name) const override;
++    
++    virtual DataTypePtr getColumnType(unsigned int column_idx) const override;
++
++    virtual unsigned int getNumberOfRows(unsigned int column_idx) const override;
++
++    virtual void insertIntoColumn(MutableColumnPtr & column, unsigned int column_idx, uint64_t sketch_total) const override;
++   
++private:
++    virtual void insertArgumentsIntoColumn(MutableColumnPtr & column, uint64_t sketch_total) const override;
++    virtual void insertSketchCountersIntoColumn(MutableColumnPtr & column) const override;
++    virtual void insertFlowkeysIntoColumn(MutableColumnPtr & column) const;
++    virtual void insertFlowkeyEstimatesIntoColumn(MutableColumnPtr & column) const;
++};
++
++}
+diff --git a/src/Sketches/CountSketch.cpp b/src/Sketches/CountSketch.cpp
+new file mode 100644
+index 00000000000..030624291cc
+--- /dev/null
++++ b/src/Sketches/CountSketch.cpp
+@@ -0,0 +1,209 @@
++#include <Sketches/CountSketch.h>
++#include <Sketches/SketchFactory.h>
++#include <DataTypes/DataTypeFactory.h>
++
++#include <algorithm>
++
++#include <xxhash.h>
++
++namespace DB
++{
++
++Float64 median(std::vector<int32_t> values)
++{
++    const size_t & n = values.size();
++    std::sort(values.begin(), values.end());
++    if (n % 2 == 0)
++    {
++        return static_cast<Float64>(values[(n-2) / 2] + values[n / 2]) / 2.0;
++    }
++    else
++    {
++        return static_cast<Float64>(values[(n-1) / 2]);
++    }
++}
++
++CountSketch::CountSketch(unsigned int /*_levels*/, unsigned int _rows, unsigned int _width)
++    : ISketch("CountSketch")
++{
++    rows = _rows;
++    width = _width;
++    sketch_counters.resize(rows);
++    for(uint32_t i = 0; i < rows; i++)
++    {
++        sketch_counters[i].resize(width);
++    }
++    flowkey_storage_size = 100;
++}
++
++void CountSketch::update(flowkey_t flowkey)
++{
++    Float64 estimate = updateCounters(flowkey);
++    updateFlowkeyStorage(flowkey, estimate);
++}
++
++Float64 CountSketch::updateCounters(flowkey_t flowkey)
++{
++    int32_t increment;
++    uint32_t sketch_column_index;
++    std::vector<int32_t> estimates(rows);
++
++    for (uint32_t sketch_row_index = 0; sketch_row_index < rows; sketch_row_index++)
++    {
++        increment = XXH32(static_cast<const void*>(&flowkey), sizeof(flowkey), sketch_row_index + rows) % 2;
++        increment = increment * 2 - 1;
++        sketch_column_index = XXH32(static_cast<const void*>(&flowkey), sizeof(flowkey), sketch_row_index) % width;
++        sketch_counters[sketch_row_index][sketch_column_index] += increment;
++        //estimates.push_back(sketch_counters[sketch_row_index][sketch_column_index] * increment);
++        estimates[sketch_row_index] = sketch_counters[sketch_row_index][sketch_column_index] * increment;
++    }
++
++    return median(estimates);
++}
++
++void CountSketch::updateFlowkeyStorage(flowkey_t flowkey, Float64 estimate)
++{
++    auto it = std::find_if(flowkey_storage.begin(), flowkey_storage.end(), [flowkey](const std::pair<flowkey_t, uint32_t> & pair) {return pair.first == flowkey;});
++    if (it != flowkey_storage.end())
++    {
++        flowkey_storage.erase(it);
++    }
++    else
++    {
++        if (flowkey_storage.size() < flowkey_storage_size)
++        {
++        }
++        else
++        {
++            //Float64 least_element = flowkey_storage.begin()->second;
++            Float64 least_element = std::prev(flowkey_storage.end())->second;
++            if (estimate < least_element)
++            {
++                return;
++            }
++            else
++            {
++                //flowkey_storage.erase(flowkey_storage.begin());
++                flowkey_storage.erase(std::prev(flowkey_storage.end()));
++            }
++        }
++    }
++    flowkey_storage.emplace(flowkey, estimate);
++}
++
++void CountSketch::insertSketchCountersIntoColumn(MutableColumnPtr & column) const
++{
++    for(uint32_t i = 0; i < rows; i++)
++    {
++        Array row_array(width);
++        std::transform(
++            sketch_counters[i].cbegin(), sketch_counters[i].cend(), row_array.begin(),
++            [](sketch_t value) {return Field(value);}
++        );
++        column->insert(Field(row_array));
++    }
++}
++
++unsigned int CountSketch::getNumberOfColumns(String query_name) const
++{
++    if (query_name == "entropy")
++    {
++        return 1;
++    }
++    else if (query_name.find("heavy_hitter") != String::npos)
++    {
++        return 3;
++    }
++    assert(false);
++    return 0;
++}
++
++DataTypePtr CountSketch::getColumnType(unsigned int column_idx) const
++{
++    if (column_idx == 0)
++    {
++        return DataTypeFactory::instance().get("Array(Int32)");
++    }
++    else if (column_idx == 1)
++    {
++        return DataTypeFactory::instance().get("UInt64");
++    }
++    else if (column_idx == 2)
++    {
++        return DataTypeFactory::instance().get("Float64");
++    }
++    assert(false);
++    return nullptr;
++}
++
++unsigned int CountSketch::getNumberOfRows(unsigned int column_idx) const
++{
++    if (column_idx == 0)
++    {
++        return rows + 1;
++    }
++    else if (column_idx == 1 || column_idx == 2)
++    {
++        return flowkey_storage_size;
++    }
++    assert(false);
++    return 0;
++}
++
++void CountSketch::insertIntoColumn(MutableColumnPtr & column, unsigned int column_idx, uint64_t sketch_total) const
++{
++    if (column_idx == 0)
++    {
++        insertArgumentsIntoColumn(column, sketch_total);
++        insertSketchCountersIntoColumn(column);
++    }
++    else if (column_idx == 1)
++    {
++        insertFlowkeysIntoColumn(column);
++    }
++    else if (column_idx == 2)
++    {
++        insertFlowkeyEstimatesIntoColumn(column);
++    }
++    else
++    {
++        assert(false);
++    }
++}
++
++void CountSketch::insertArgumentsIntoColumn(MutableColumnPtr & column, uint64_t sketch_total) const
++{
++	Array sketch_arguments_array(5);
++	sketch_arguments_array[0] = Field(sketch_total);
++	sketch_arguments_array[1] = Field(1);
++	sketch_arguments_array[2] = Field(rows);
++	sketch_arguments_array[3] = Field(width);
++	sketch_arguments_array[4] = Field(flowkey_storage_size);
++	column->insert(Field(sketch_arguments_array));
++}
++
++void CountSketch::insertFlowkeysIntoColumn(MutableColumnPtr & column) const
++{
++    for (auto it = flowkey_storage.begin(); it != flowkey_storage.end(); it++)
++    {
++        column->insert(Field(it->first));
++    }
++}
++
++void CountSketch::insertFlowkeyEstimatesIntoColumn(MutableColumnPtr & column) const
++{
++    for (auto it = flowkey_storage.begin(); it != flowkey_storage.end(); it++)
++    {
++        column->insert(Field(it->second));
++    }
++}
++
++void registerCountSketch(SketchFactory & factory)
++{
++    factory.registerSketch("cs", [](const SketchFactory::Arguments & args)
++    {
++        return std::make_shared<CountSketch>(args.levels, args.rows, args.width);
++    });
++}
++
++}
+diff --git a/src/Sketches/CountSketch.h b/src/Sketches/CountSketch.h
+new file mode 100644
+index 00000000000..61dd4192f78
+--- /dev/null
++++ b/src/Sketches/CountSketch.h
+@@ -0,0 +1,55 @@
++#pragma once
++
++#include <queue>
++
++#include <Sketches/ISketch.h>
++
++namespace DB
++{
++
++class CountSketch : public ISketch
++{
++private:
++    using sketch_t = int32_t;
++    unsigned int rows;
++    unsigned int width;
++    std::vector<std::vector<sketch_t>> sketch_counters;
++	// flowkey storage
++    unsigned int flowkey_storage_size;
++    // define comparator for flowkey_storage that compares the second element of the pair
++    struct CompareSecond
++    {
++        bool operator()(const std::pair<flowkey_t, Float64>& left, const std::pair<flowkey_t, Float64>& right) const
++        {
++            return left.second > right.second;
++        }
++    };
++    std::set<std::pair<flowkey_t, Float64>, CompareSecond> flowkey_storage;
++
++public:
++    CountSketch(unsigned int /*_levels*/, unsigned int _rows, unsigned int _width);
++
++    virtual long getSize() const override { return rows * width; }
++
++    virtual void update(flowkey_t flowkey) override;
++
++    Float64 updateCounters(flowkey_t flowkey);
++
++    void updateFlowkeyStorage(flowkey_t flowkey, Float64 estimate);
++    
++    virtual unsigned int getNumberOfColumns(String query_name) const override;
++    
++    virtual DataTypePtr getColumnType(unsigned int column_idx) const override;
++
++    virtual unsigned int getNumberOfRows(unsigned int column_idx) const override;
++
++    virtual void insertIntoColumn(MutableColumnPtr & column, unsigned int column_idx, uint64_t sketch_total) const override;
++   
++private:
++    virtual void insertArgumentsIntoColumn(MutableColumnPtr & column, uint64_t sketch_total) const override;
++    virtual void insertSketchCountersIntoColumn(MutableColumnPtr & column) const override;
++    virtual void insertFlowkeysIntoColumn(MutableColumnPtr & column) const;
++    virtual void insertFlowkeyEstimatesIntoColumn(MutableColumnPtr & column) const;
++};
++
++}
+diff --git a/src/Sketches/ISketch.cpp b/src/Sketches/ISketch.cpp
+new file mode 100644
+index 00000000000..651d89e563f
+--- /dev/null
++++ b/src/Sketches/ISketch.cpp
+@@ -0,0 +1,12 @@
++#include <Sketches/ISketch.h>
++
++namespace DB
++{
++
++ISketch::ISketch(String _name)
++: log(&Poco::Logger::get(_name))
++{
++    name = _name;
++}
++
++}
+diff --git a/src/Sketches/ISketch.h b/src/Sketches/ISketch.h
+new file mode 100644
+index 00000000000..c40de17a66f
+--- /dev/null
++++ b/src/Sketches/ISketch.h
+@@ -0,0 +1,54 @@
++#pragma once
++
++#include <base/types.h>
++#include <Columns/IColumn.h>
++#include <DataTypes/DataTypeArray.h>
++
++#include <cstdint>
++#include <memory>
++
++namespace DB
++{
++
++using flowkey_t = uint64_t;
++
++namespace ErrorCodes
++{
++    extern const int NOT_IMPLEMENTED;
++}
++
++class ISketch : public std::enable_shared_from_this<ISketch>
++{
++private:
++    String name;
++
++protected:
++    Poco::Logger * log;
++
++public:
++    ISketch(String);
++
++    String getName() { return name; }
++
++    virtual long getSize() const = 0;
++
++    virtual void update(flowkey_t flowkey) = 0;
++
++    virtual unsigned int getNumberOfColumns(String query_name) const = 0;
++
++    virtual DataTypePtr getColumnType(unsigned int column_idx) const = 0;
++
++    virtual unsigned int getNumberOfRows(unsigned int column_idx) const = 0;
++
++    virtual void insertIntoColumn(MutableColumnPtr & column, unsigned int column_idx, uint64_t sketch_total) const = 0;
++
++    virtual ~ISketch() = default;
++
++private:
++    virtual void insertArgumentsIntoColumn(MutableColumnPtr & column, uint64_t sketch_total) const = 0;
++    virtual void insertSketchCountersIntoColumn(MutableColumnPtr & column) const = 0;
++};
++
++using SketchPtr = std::shared_ptr<ISketch>;
++
++}
+diff --git a/src/Sketches/LC.cpp b/src/Sketches/LC.cpp
+new file mode 100644
+index 00000000000..affc9d9ab9b
+--- /dev/null
++++ b/src/Sketches/LC.cpp
+@@ -0,0 +1,93 @@
++#include <Sketches/LC.h>
++#include <Sketches/SketchFactory.h>
++#include <DataTypes/DataTypeFactory.h>
++
++#include <xxhash.h>
++
++namespace DB
++{
++
++LC::LC(unsigned int /*_levels*/, unsigned int /*_rows*/, unsigned int _width)
++    : ISketch("LC")
++{
++    width = _width;
++    sketch_counters.resize(width);
++}
++
++void LC::update(flowkey_t flowkey)
++{
++    const uint32_t hash_seed = 0;
++    uint32_t sketch_column_index = XXH32(static_cast<const void*>(&flowkey), sizeof(flowkey), hash_seed) % width;
++    sketch_counters[sketch_column_index] = 1;
++}
++
++void LC::insertSketchCountersIntoColumn(MutableColumnPtr & column) const
++{
++    Array level_array(width);
++    std::transform(
++        sketch_counters.cbegin(), sketch_counters.cend(), level_array.begin(),
++        [](sketch_t value) {return Field(value);}
++    );
++    column->insert(Field(level_array));
++}
++
++unsigned int LC::getNumberOfColumns(String query_name) const
++{
++    if (query_name == "cardinality")
++    {
++        return 1;
++    }
++    assert(false);
++    return 0;
++}
++
++DataTypePtr LC::getColumnType(unsigned int column_idx) const
++{
++    if (column_idx == 0)
++    {
++        // TODO: this should go back to Array(Bool)
++        //return DataTypeFactory::instance().get("Array(Bool)");
++        return DataTypeFactory::instance().get("Array(UInt32)");
++    }
++    assert(false);
++    return nullptr;
++}
++
++unsigned int LC::getNumberOfRows(unsigned int column_idx) const
++{
++    if (column_idx == 0)
++    {
++        return 1;
++    }
++    assert(false);
++    return 0;
++}
++
++void LC::insertIntoColumn(MutableColumnPtr & column, unsigned int column_idx, uint64_t sketch_total) const
++{
++    if (column_idx == 0)
++    {
++        insertArgumentsIntoColumn(column, sketch_total);
++        insertSketchCountersIntoColumn(column);
++    }
++}
++
++void LC::insertArgumentsIntoColumn(MutableColumnPtr & column, uint64_t sketch_total) const
++{
++	Array sketch_arguments_array(4);
++	sketch_arguments_array[0] = Field(sketch_total);
++	sketch_arguments_array[1] = Field(1);
++	sketch_arguments_array[2] = Field(1);
++	sketch_arguments_array[3] = Field(width);
++	column->insert(Field(sketch_arguments_array));
++}
++
++void registerLC(SketchFactory & factory)
++{
++    factory.registerSketch("lc", [](const SketchFactory::Arguments & args)
++    {
++        return std::make_shared<LC>(args.levels, args.rows, args.width);
++    });
++}
++
++}
+diff --git a/src/Sketches/LC.h b/src/Sketches/LC.h
+new file mode 100644
+index 00000000000..e16eac061c2
+--- /dev/null
++++ b/src/Sketches/LC.h
+@@ -0,0 +1,40 @@
++#pragma once
++
++#include <queue>
++
++#include <Sketches/ISketch.h>
++
++namespace DB
++{
++
++class LC : public ISketch
++{
++private:
++    //using sketch_t = bool;
++    // TODO: this should go back to Array(Bool)
++    using sketch_t = uint32_t;
++    unsigned int width;
++    std::vector<sketch_t> sketch_counters;
++
++public:
++    LC(unsigned int /*_levels*/, unsigned int /*_rows*/, unsigned int _width);
++
++    virtual long getSize() const override { return width; }
++
++    virtual void update(flowkey_t flowkey) override;
++
++    virtual unsigned int getNumberOfColumns(String query_name) const override;
++    
++    virtual DataTypePtr getColumnType(unsigned int column_idx) const override;
++
++    virtual unsigned int getNumberOfRows(unsigned int column_idx) const override;
++
++    virtual void insertIntoColumn(MutableColumnPtr & column, unsigned int column_idx, uint64_t sketch_total) const override;
++
++private:
++    virtual void insertArgumentsIntoColumn(MutableColumnPtr & column, uint64_t sketch_total) const override;
++    virtual void insertSketchCountersIntoColumn(MutableColumnPtr & column) const override;
++};
++
++}
++
+diff --git a/src/Sketches/MRAC.cpp b/src/Sketches/MRAC.cpp
+new file mode 100644
+index 00000000000..d3920616379
+--- /dev/null
++++ b/src/Sketches/MRAC.cpp
+@@ -0,0 +1,120 @@
++#include <Sketches/MRAC.h>
++#include <Sketches/SketchFactory.h>
++#include <DataTypes/DataTypeFactory.h>
++
++#include <xxhash.h>
++
++namespace DB
++{
++
++MRAC::MRAC(unsigned int _levels, unsigned int /*_rows*/, unsigned int _width)
++    : ISketch("MRAC")
++{
++    levels = _levels;
++    width = _width;
++    sketch_counters.resize(levels);
++    for(uint32_t i = 0; i < levels; i++)
++    {
++        sketch_counters[i].resize(width);
++    }
++}
++
++void MRAC::update(flowkey_t flowkey)
++{
++    const uint32_t sketch_row_index = 0;
++    const uint32_t level_hash_seed = 1;
++    uint32_t sketch_column_index = XXH32(static_cast<const void*>(&flowkey), sizeof(flowkey), sketch_row_index) % width;
++    uint32_t level_hash = XXH32(static_cast<const void*>(&flowkey), sizeof(flowkey), level_hash_seed) % (1 << levels);
++    uint32_t level = get_last_level(level_hash);
++    if (level < levels)
++    {
++        sketch_counters[level][sketch_column_index] += 1;
++    }
++}
++
++uint32_t MRAC::get_last_level(uint32_t level_hash)
++{
++    uint32_t last_level = 0;
++    for(int32_t i = levels - 1; i >= 0; i--)
++    {
++        if (((level_hash >> i) & 1) == 0)
++        {
++            return last_level;
++        }
++        last_level++;
++    }
++    return last_level;
++}
++
++void MRAC::insertSketchCountersIntoColumn(MutableColumnPtr & column) const
++{
++    for(uint32_t i = 0; i < levels; i++)
++    {
++        Array level_array(width);
++        std::transform(
++            sketch_counters[i].cbegin(), sketch_counters[i].cend(), level_array.begin(),
++            [](sketch_t value) {return Field(value);}
++        );
++        column->insert(Field(level_array));
++        //LOG_WARNING(log, "row_array size {}", row_array.size());
++    }
++}
++
++unsigned int MRAC::getNumberOfColumns(String query_name) const
++{
++    if (query_name == "entropy")
++    {
++        return 1;
++    }
++    assert(false);
++    return 0;
++}
++
++DataTypePtr MRAC::getColumnType(unsigned int column_idx) const
++{
++    if (column_idx == 0)
++    {
++        return DataTypeFactory::instance().get("Array(UInt32)");
++    }
++    assert(false);
++    return nullptr;
++}
++
++unsigned int MRAC::getNumberOfRows(unsigned int column_idx) const
++{
++    if (column_idx == 0)
++    {
++        return levels + 1;
++    }
++    assert(false);
++    return 0;
++}
++
++void MRAC::insertIntoColumn(MutableColumnPtr & column, unsigned int column_idx, uint64_t sketch_total) const
++{
++    if (column_idx == 0)
++    {
++        insertArgumentsIntoColumn(column, sketch_total);
++        insertSketchCountersIntoColumn(column);
++    }
++}
++
++void MRAC::insertArgumentsIntoColumn(MutableColumnPtr & column, uint64_t sketch_total) const
++{
++	Array sketch_arguments_array(4);
++	sketch_arguments_array[0] = Field(sketch_total);
++	sketch_arguments_array[1] = Field(levels);
++	sketch_arguments_array[2] = Field(1);
++	sketch_arguments_array[3] = Field(width);
++	column->insert(Field(sketch_arguments_array));
++}
++
++void registerMRAC(SketchFactory & factory)
++{
++    factory.registerSketch("mrac", [](const SketchFactory::Arguments & args)
++    {
++        return std::make_shared<MRAC>(args.levels, args.rows, args.width);
++    });
++}
++
++}
+diff --git a/src/Sketches/MRAC.h b/src/Sketches/MRAC.h
+new file mode 100644
+index 00000000000..f19519208a5
+--- /dev/null
++++ b/src/Sketches/MRAC.h
+@@ -0,0 +1,42 @@
++#pragma once
++
++#include <queue>
++
++#include <Sketches/ISketch.h>
++
++namespace DB
++{
++
++class MRAC : public ISketch
++{
++private:
++    using sketch_t = uint32_t;
++    unsigned int levels;
++    unsigned int width;
++    std::vector<std::vector<sketch_t>> sketch_counters;
++    std::priority_queue<std::pair<flowkey_t, uint64_t>> flowkey_storage;
++
++public:
++    MRAC(unsigned int _levels, unsigned int /*_rows*/, unsigned int _width);
++
++    virtual long getSize() const override { return levels * width; }
++
++    virtual void update(flowkey_t flowkey) override;
++
++    virtual unsigned int getNumberOfColumns(String query_name) const override;
++    
++    virtual DataTypePtr getColumnType(unsigned int column_idx) const override;
++
++    virtual unsigned int getNumberOfRows(unsigned int column_idx) const override;
++
++    virtual void insertIntoColumn(MutableColumnPtr & column, unsigned int column_idx, uint64_t sketch_total) const override;
++
++private:
++    uint32_t get_last_level(uint32_t level_hash);
++
++    virtual void insertArgumentsIntoColumn(MutableColumnPtr & column, uint64_t sketch_total) const override;
++    virtual void insertSketchCountersIntoColumn(MutableColumnPtr & column) const override;
++    //std::vector<std::vector<sketch_t>> & getData() { return sketch_counters; }
++};
++
++}
+diff --git a/src/Sketches/README.md b/src/Sketches/README.md
+new file mode 100644
+index 00000000000..0b029af7e5c
+--- /dev/null
++++ b/src/Sketches/README.md
+@@ -0,0 +1 @@
++This directory has the data plane code for various sketches
+diff --git a/src/Sketches/SketchFactory.cpp b/src/Sketches/SketchFactory.cpp
+new file mode 100644
+index 00000000000..2612ddd0cf9
+--- /dev/null
++++ b/src/Sketches/SketchFactory.cpp
+@@ -0,0 +1,45 @@
++#include <Sketches/SketchFactory.h>
++//#include <Parsers/ASTFunction.h>
++#include <Common/Exception.h>
++//#include <Common/StringUtils/StringUtils.h>
++//#include <IO/WriteHelpers.h>
++
++namespace DB
++{
++
++namespace ErrorCodes
++{
++    extern const int UNKNOWN_SKETCH;
++    extern const int LOGICAL_ERROR;
++}
++
++void SketchFactory::registerSketch(const std::string & name, CreatorFn creator_fn)
++{
++    if (!sketches.emplace(name, Creator{std::move(creator_fn)}).second)
++        throw Exception(ErrorCodes::LOGICAL_ERROR, "SketchFactory: the sketch name '{}' is not unique", name);
++}
++
++SketchPtr SketchFactory::get(const String & name, const Arguments & arguments) const
++{
++    auto it = sketches.find(name);
++    if (it == sketches.end())
++    {
++        throw Exception(ErrorCodes::UNKNOWN_SKETCH, "Unknown sketch {}", name);
++    }
++
++    //Arguments arguments{
++    //    .
++    //    .comment = comment};
++
++    auto res = sketches.at(name).creator_fn(arguments);
++    
++    return res;
++}
++
++SketchFactory & SketchFactory::instance()
++{
++    static SketchFactory ret;
++    return ret;
++}
++
++}
+diff --git a/src/Sketches/SketchFactory.h b/src/Sketches/SketchFactory.h
+new file mode 100644
+index 00000000000..c1aa045c0eb
+--- /dev/null
++++ b/src/Sketches/SketchFactory.h
+@@ -0,0 +1,55 @@
++#pragma once
++
++#include <Sketches/ISketch.h>
++
++#include <boost/noncopyable.hpp>
++
++#include <unordered_map>
++#include <functional>
++
++namespace DB
++{
++
++class SketchFactory : private boost::noncopyable
++{
++public:
++
++    static SketchFactory & instance();
++
++    struct Arguments
++    {
++        const unsigned int & levels;
++        const unsigned int & rows;
++        const unsigned int & width;
++    };
++
++    using CreatorFn = std::function<SketchPtr(const Arguments & arguments)>;
++    struct Creator
++    {
++        CreatorFn creator_fn;
++    };
++
++    using Sketches = std::unordered_map<std::string, Creator>;
++
++    SketchPtr get(const String & name, const Arguments & arguments) const;
++
++    void registerSketch(const std::string & name, CreatorFn creator_fn);
++
++    const Sketches & getAllSketches() const
++    {
++        return sketches;
++    }
++
++    //std::vector<String> getAllRegisteredNames() const 
++    //{
++    //    std::vector<String> result;
++    //    auto getter = [](const auto & pair) { return pair.first; };
++    //    std::transform(sketches.begin(), sketches.end(), std::back_inserter(result), getter);
++    //    return result;
++    //}
++
++private:
++    Sketches sketches;
++};
++
++}
+diff --git a/src/Sketches/registerSketches.cpp b/src/Sketches/registerSketches.cpp
+new file mode 100644
+index 00000000000..15b685914e5
+--- /dev/null
++++ b/src/Sketches/registerSketches.cpp
+@@ -0,0 +1,22 @@
++#include <Sketches/registerSketches.h>
++#include <Sketches/SketchFactory.h>
++
++namespace DB
++{
++
++void registerCountMin(SketchFactory & factory);
++void registerCountSketch(SketchFactory & factory);
++void registerMRAC(SketchFactory & factory);
++void registerLC(SketchFactory & factory);
++
++void registerSketches()
++{
++    auto & factory = SketchFactory::instance();
++
++    registerCountMin(factory);
++    registerCountSketch(factory);
++    registerMRAC(factory);
++    registerLC(factory);
++}
++
++}
+diff --git a/src/Sketches/registerSketches.h b/src/Sketches/registerSketches.h
+new file mode 100644
+index 00000000000..0844b4a597d
+--- /dev/null
++++ b/src/Sketches/registerSketches.h
+@@ -0,0 +1,6 @@
++#pragma once
++
++namespace DB
++{
++void registerSketches();
++}
+diff --git a/src/Storages/IStorage.h b/src/Storages/IStorage.h
+index 83249ae5151..9ff7ba29424 100644
+--- a/src/Storages/IStorage.h
++++ b/src/Storages/IStorage.h
+@@ -18,10 +18,11 @@
+ #include <Common/RWLock.h>
+ #include <Common/TypePromotion.h>
+ 
++#include <Sketches/ISketch.h>
++
+ #include <optional>
+ #include <compare>
+ 
+-
+ namespace DB
+ {
+ 
+@@ -98,7 +99,12 @@ public:
+     /// Storage metadata can be set separately in setInMemoryMetadata method
+     explicit IStorage(StorageID storage_id_)
+         : storage_id(std::move(storage_id_))
+-        , metadata(std::make_unique<StorageInMemoryMetadata>()) {}
++        , metadata(std::make_unique<StorageInMemoryMetadata>())
++        // MILIND
++        //, count_sketch_array(SKETCH_ROWS, std::vector<sketch_t>(SKETCH_COLUMNS, 0))
++    {
++        sketch_total = 0;
++    }
+ 
+     IStorage(const IStorage &) = delete;
+     IStorage & operator=(const IStorage &) = delete;
+@@ -705,10 +711,24 @@ public:
+         return std::make_shared<StorageSnapshot>(*this, metadata_snapshot);
+     }
+ 
++    // MILIND
++    virtual StorageSnapshotPtr getStorageSnapshot(const StorageMetadataPtr & metadata_snapshot, const ASTPtr & /*query*/, ContextPtr /*query_context*/) const
++    {
++        return std::make_shared<StorageSnapshot>(*this, metadata_snapshot);
++    }
++
+     /// Creates a storage snapshot from given metadata and columns, which are used in query.
+-    virtual StorageSnapshotPtr getStorageSnapshotForQuery(const StorageMetadataPtr & metadata_snapshot, const ASTPtr & /*query*/, ContextPtr query_context) const
++    virtual StorageSnapshotPtr getStorageSnapshotForQuery(const StorageMetadataPtr & metadata_snapshot, const ASTPtr & query, ContextPtr query_context) const
+     {
+-        return getStorageSnapshot(metadata_snapshot, query_context);
++        // MILIND
++        if (read_from_sketch)
++        {
++            return getStorageSnapshot(metadata_snapshot, query, query_context);
++        }
++        else
++        {
++            return getStorageSnapshot(metadata_snapshot, query_context);
++        }
+     }
+ 
+     /// Creates a storage snapshot but without holding a data specific to storage.
+@@ -717,6 +737,8 @@ public:
+         return getStorageSnapshot(metadata_snapshot, query_context);
+     }
+ 
++
++
+     /// A helper to implement read()
+     static void readFromPipe(
+         QueryPlan & query_plan,
+@@ -737,6 +759,17 @@ private:
+     /// DROP-like queries take this lock for write (lockExclusively), to be sure
+     /// that all table threads finished.
+     mutable RWLock drop_lock = RWLockImpl::create();
++
++/// MILIND
++protected:
++    bool read_from_sketch = false;
++    std::unordered_map<String, SketchPtr> sketches_map;
++    uint64_t sketch_total;
++
++public:
++    void enableReadFromSketch() {read_from_sketch = true;}
++    void disableReadFromSketch() {read_from_sketch = false;}
++    virtual String lookupSketchName(String /*metric_name*/) const { return ""; }
+ };
+ 
+ }
+diff --git a/src/Storages/MemorySettings.h b/src/Storages/MemorySettings.h
+index 9e1a8db3595..dee9ca09474 100644
+--- a/src/Storages/MemorySettings.h
++++ b/src/Storages/MemorySettings.h
+@@ -10,6 +10,8 @@ class ASTStorage;
+ 
+ #define MEMORY_SETTINGS(M, ALIAS) \
+     M(Bool, compress, false, "Compress data in memory", 0) \
++    M(String, sketch_dp_configuration, "", "Sketch data plane configuration", 0) \
++    M(String, sketch_cp_configuration, "", "Sketch control plane configuration", 0) \
+ 
+ DECLARE_SETTINGS_TRAITS(memorySettingsTraits, MEMORY_SETTINGS)
+ 
+diff --git a/src/Storages/StorageMemory.cpp b/src/Storages/StorageMemory.cpp
+index 2ef1d8d3183..81d8207aab2 100644
+--- a/src/Storages/StorageMemory.cpp
++++ b/src/Storages/StorageMemory.cpp
+@@ -34,6 +34,18 @@
+ #include <Disks/TemporaryFileOnDisk.h>
+ #include <IO/copyData.h>
+ 
++// MILIND
++#include <Common/logger_useful.h>
++#include <DataTypes/DataTypeFactory.h>
++#include <DataTypes/DataTypeArray.h>
++#include <Sketches/Config.h>
++#include <Parsers/ASTFunction.h>
++
++//#include <Sketches/CountSketch.h>
++//#include <Sketches/CountMin.h>
++//#include <Sketches/MRAC.h>
++//#include <Sketches/LC.h>
++#include <Sketches/SketchFactory.h>
+ 
+ namespace DB
+ {
+@@ -50,10 +62,16 @@ public:
+     MemorySink(
+         StorageMemory & storage_,
+         const StorageMetadataPtr & metadata_snapshot_,
+-        ContextPtr context)
++        ContextPtr context_)
++        // MILIND
++        //std::map<String, SketchConfiguration> sketch_dp_configuration_map_)
+         : SinkToStorage(metadata_snapshot_->getSampleBlock())
+         , storage(storage_)
+-        , storage_snapshot(storage_.getStorageSnapshot(metadata_snapshot_, context))
++        , storage_snapshot(storage_.getStorageSnapshot(metadata_snapshot_, context_))
++        // MILIND
++        , log(&Poco::Logger::get("MemorySink"))
++        , context(context_)
++        //, sketch_dp_configuration_map(sketch_dp_configuration_map_)
+     {
+     }
+ 
+@@ -104,6 +122,52 @@ public:
+         storage.data.set(std::move(new_data));
+         storage.total_size_bytes.fetch_add(inserted_bytes, std::memory_order_relaxed);
+         storage.total_size_rows.fetch_add(inserted_rows, std::memory_order_relaxed);
++
++        // MILIND: update sketch
++        const auto & settings = context->getSettingsRef();
++        if (settings.use_sketchdb)
++        {
++            const ColumnWithTypeAndName* flowkey_column;
++            size_t flowkey_column_size;
++            flowkey_t flowkey;
++
++            for (const auto & block : new_blocks)
++            {
++                // check if block has flowkey column
++                flowkey_column = block.findByName("flowkey");
++                if (flowkey_column == nullptr)
++                {
++                    break;
++                }
++                //LOG_WARNING(log, "Updating count sketch");
++                flowkey_column_size = flowkey_column->column->size();
++                //LOG_WARNING(log, "Updating count sketch for a block with column size {}", flowkey_column_size);
++                for (uint32_t data_idx = 0; data_idx < flowkey_column_size; data_idx++)
++                {
++                    flowkey = flowkey_column->column->getUInt(data_idx);
++                    for (auto it = storage.sketches_map.cbegin(); it != storage.sketches_map.cend(); it++)
++                    {
++                        it->second->update(flowkey);
++                    }
++                    //storage.count_sketch->update(flowkey);
++
++                    //for (uint32_t sketch_row_index = 0; sketch_row_index < sketch_dp_configuration_map.at("cs").rows; sketch_row_index++)
++                    //{
++                    //    //increment = res_hash(flowkey, row_index, 2);
++                    //    //increment = int32_t(sketch_row_index % 2) * 2 - 1;
++                    //    increment = XXH32(static_cast<const void*>(&flowkey), sizeof(flowkey), sketch_row_index + sketch_dp_configuration_map.at("cs").rows) % 2;
++                    //    increment = increment * 2 - 1;
++                    //    //column_index = index_hash(flowkey, row_index, SKETCH_COLUMNS);
++                    //    //sketch_column_index = flowkey % SKETCH_COLUMNS;
++                    //    sketch_column_index = XXH32(static_cast<const void*>(&flowkey), sizeof(flowkey), sketch_row_index) % sketch_dp_configuration_map.at("cs").width;
++                    //    //storage.count_sketch_array[sketch_row_index][sketch_column_index] += increment;
++                    //    storage.count_sketch->getData()[sketch_row_index][sketch_column_index] += increment;
++                    //    //LOG_WARNING(log, "Updating count sketch row {} column {} increment {}", sketch_row_index, sketch_column_index, increment);
++                    //}
++                }
++                storage.sketch_total += block.rows();
++            }
++        }
+     }
+ 
+ private:
+@@ -111,27 +175,183 @@ private:
+ 
+     StorageMemory & storage;
+     StorageSnapshotPtr storage_snapshot;
+-};
+ 
++    // MILIND
++    Poco::Logger * log;
++    ContextPtr context;
++    std::map<String, SketchConfiguration> sketch_dp_configuration_map;
++};
+ 
+ StorageMemory::StorageMemory(
+     const StorageID & table_id_,
+     ColumnsDescription columns_description_,
+     ConstraintsDescription constraints_,
+     const String & comment,
+-    bool compress_)
++    bool compress_,
++    const String & sketch_dp_configuration_,
++    const String & sketch_cp_configuration_)
+     : IStorage(table_id_), data(std::make_unique<const Blocks>()), compress(compress_)
++    , log(&Poco::Logger::get("StorageMemory"))
+ {
+     StorageInMemoryMetadata storage_metadata;
+     storage_metadata.setColumns(std::move(columns_description_));
+     storage_metadata.setConstraints(std::move(constraints_));
+     storage_metadata.setComment(comment);
+     setInMemoryMetadata(storage_metadata);
++
++    // MILIND
++    sketch_dp_configuration = sketch_dp_configuration_;
++    sketch_cp_configuration = sketch_cp_configuration_;
++
++    if (sketch_dp_configuration != "")
++    {
++        parse_sketch_configurations();
++
++        unsigned int levels, rows, width;
++
++        for(auto it = sketch_dp_configuration_map.cbegin(); it != sketch_dp_configuration_map.cend(); it++)
++        {
++            levels = it->second.levels;
++            rows = it->second.rows;
++            width = it->second.width;
++
++            // MILIND
++            const SketchFactory::Arguments args{
++                .levels = levels,
++                .rows = rows,
++                .width = width
++            };
++
++            sketches_map.emplace(it->first, SketchFactory::instance().get(it->first, args));
++            //if (it->first == "cs")
++            //{
++            //    sketches_map.emplace(it->first, std::make_shared<CountSketch>(levels, rows, width));
++            //}
++            //else if (it->first == "cm")
++            //{
++            //    sketches_map.emplace(it->first, std::make_shared<CountMin>(levels, rows, width));
++            //}
++            //else if (it->first == "mrac")
++            //{
++            //    sketches_map.emplace(it->first, std::make_shared<MRAC>(levels, rows, width));
++            //}
++            //else if (it->first == "lc")
++            //{
++            //    sketches_map.emplace(it->first, std::make_shared<LC>(levels, rows, width));
++            //}
++        }
++    }
++}
++
++std::vector<String> split(const String input, const String delimiter)
++{
++    std::vector<String> result;
++    size_t last = 0, next = 0;
++    String token;
++    while ((next = input.find(delimiter, last)) != String::npos)
++    {
++        token = input.substr(last, next - last);
++        result.push_back(token);
++        last = next + 1;
++    }
++    result.push_back(input.substr(last));
++    return result;
++}
++
++void StorageMemory::parse_sketch_configurations()
++{
++    // parse DP configuration
++    std::vector<String> sketch_tokens = split(sketch_dp_configuration, ";");
++    std::vector<String> sketch_config_tokens;
++    String sketch, query;
++    unsigned int level, rows, width;
++
++    for (auto & sketch_token : sketch_tokens)
++    {
++        sketch_token.erase(std::remove(sketch_token.begin(), sketch_token.end(), '('), sketch_token.end());
++        sketch_token.erase(std::remove(sketch_token.begin(), sketch_token.end(), ')'), sketch_token.end());
++        sketch_config_tokens = split(sketch_token, ",");
++        sketch = sketch_config_tokens[0];
++        level = atoi(sketch_config_tokens[1].c_str());
++        rows = atoi(sketch_config_tokens[2].c_str());
++        width = atoi(sketch_config_tokens[3].c_str());
++        //LOG_WARNING(log, "sketch {} level {} row {} width {}", sketch, level, rows, width);
++        sketch_dp_configuration_map.emplace(std::piecewise_construct, std::forward_as_tuple(sketch), std::forward_as_tuple(sketch, level, rows, width));
++    }
++
++    // parse CP configuration
++    sketch_tokens = split(sketch_cp_configuration, ";");
++    for (auto & sketch_token : sketch_tokens)
++    {
++        sketch_token.erase(std::remove(sketch_token.begin(), sketch_token.end(), '('), sketch_token.end());
++        sketch_token.erase(std::remove(sketch_token.begin(), sketch_token.end(), ')'), sketch_token.end());
++        sketch_config_tokens = split(sketch_token, ",");
++        query = sketch_config_tokens[0];
++        sketch = sketch_config_tokens[1];
++        sketch_cp_configuration_map.emplace(query, sketch);
++    }
++}
++
++String StorageMemory::lookupSketchName(String metric_name) const
++{
++    //if (metric_name.find("heavy_hitter") != String::npos)
++    //{
++    //    metric_name = "heavy_hitters";
++    //}
++    if (sketch_cp_configuration_map.find(metric_name) != sketch_cp_configuration_map.end())
++    {
++        return sketch_cp_configuration_map.at(metric_name);
++    }
++    else
++    {
++        return "";
++    }
++}
++
++std::shared_ptr<const Blocks> StorageMemory::convertSketchToBlocks(const String & query_name) const
++{
++    const String sketch_name = lookupSketchName(query_name);
++    if (sketch_name == "")
++    {
++        return nullptr;
++    }
++    auto sketch = sketches_map.at(sketch_name);    
++
++    unsigned int num_columns = sketch->getNumberOfColumns(query_name);
++
++    ColumnsWithTypeAndName columns(num_columns);
++
++    unsigned int max_number_of_rows = 0;
++
++    for (unsigned int i = 0; i < num_columns; i++)
++    {
++        if (sketch->getNumberOfRows(i) > max_number_of_rows)
++        {
++            max_number_of_rows = sketch->getNumberOfRows(i);
++        }
++    }
++
++    for (unsigned int i = 0; i < num_columns; i++)
++    {
++        auto sketch_data_type = sketch->getColumnType(i);
++        MutableColumnPtr column = sketch_data_type->createColumn();
++        column->reserve(max_number_of_rows);
++        //LOG_WARNING(log, "column_idx {} sketch_data_type {}", i, sketch_data_type->getName());
++        sketch->insertIntoColumn(column, i, sketch_total);
++        // fill column with NULL values so that it has max_number_of_rows rows
++        column->insertManyDefaults(max_number_of_rows - sketch->getNumberOfRows(i));
++        columns[i] = ColumnWithTypeAndName(std::move(column), sketch_data_type, std::string("sketch_column_") + std::to_string(i+1));
++    }
++
++    Blocks sketch_blocks {Block(columns)};
++
++    return std::make_shared<const Blocks>(std::move(sketch_blocks));
+ }
+ 
+ StorageSnapshotPtr StorageMemory::getStorageSnapshot(const StorageMetadataPtr & metadata_snapshot, ContextPtr /*query_context*/) const
+ {
+     auto snapshot_data = std::make_unique<SnapshotData>();
++    
+     snapshot_data->blocks = data.get();
+ 
+     if (!hasDynamicSubcolumns(metadata_snapshot->getColumns()))
+@@ -146,6 +366,71 @@ StorageSnapshotPtr StorageMemory::getStorageSnapshot(const StorageMetadataPtr &
+     return std::make_shared<StorageSnapshot>(*this, metadata_snapshot, std::move(object_columns), std::move(snapshot_data));
+ }
+ 
++String StorageMemory::getMetricName(const ASTPtr & query) const
++{
++    const auto select_query = query->as<ASTSelectQuery>();
++    assert(select_query);
++    const auto & select_expression_list = select_query->select()->children;
++    if (select_expression_list.size() != 1)
++    {
++        return "";
++    }
++    const auto & select_expression = select_expression_list.at(0);
++    const auto & function_expression = select_expression->as<ASTFunction>();
++    if (!function_expression)
++    {
++        return "";
++    }
++    assert(function_expression);
++    //assert(function_expression->arguments.size() == 1);
++    //auto & argument = function_expression->arguments.at(0);
++    //assert(argument->as<ASTFunction>());
++    //auto & function = argument->as<ASTFunction &>();
++    const auto & name = function_expression->name;
++    //LOG_WARNING(log, "function_expression name {}", name);
++    return name.substr(0, name.find("_sketch"));
++}
++
++// MILIND 
++StorageSnapshotPtr StorageMemory::getStorageSnapshot(const StorageMetadataPtr & metadata_snapshot, const ASTPtr & query, ContextPtr query_context) const
++{
++    if (!read_from_sketch)
++    {
++        return getStorageSnapshot(metadata_snapshot, query_context);
++    }
++
++    auto snapshot_data = std::make_unique<SnapshotData>();
++
++    LOG_WARNING(log, "read_from_sketch {}", read_from_sketch);
++    String metric = getMetricName(query);
++
++    if (metric == "")
++    {
++        return getStorageSnapshot(metadata_snapshot, query_context);
++    }
++
++    LOG_WARNING(log, "Getting storage snapshot for metric {}", metric);
++    snapshot_data->blocks = convertSketchToBlocks(metric);
++    if (snapshot_data->blocks == nullptr)
++    {
++        return getStorageSnapshot(metadata_snapshot, query_context);
++    }
++    LOG_WARNING(log, "finished convertSketchToBlocks");
++    
++    // copied from above
++    // TODO: put below code in a common function
++    if (!hasDynamicSubcolumns(metadata_snapshot->getColumns()))
++        return std::make_shared<StorageSnapshot>(*this, metadata_snapshot, ColumnsDescription{}, std::move(snapshot_data));
++
++    auto object_columns = getConcreteObjectColumns(
++        snapshot_data->blocks->begin(),
++        snapshot_data->blocks->end(),
++        metadata_snapshot->getColumns(),
++        [](const auto & block) -> const auto & { return block.getColumnsWithTypeAndName(); });
++
++    return std::make_shared<StorageSnapshot>(*this, metadata_snapshot, std::move(object_columns), std::move(snapshot_data));
++}
++
+ void StorageMemory::read(
+     QueryPlan & query_plan,
+     const Names & column_names,
+@@ -162,6 +447,7 @@ void StorageMemory::read(
+ 
+ SinkToStoragePtr StorageMemory::write(const ASTPtr & /*query*/, const StorageMetadataPtr & metadata_snapshot, ContextPtr context, bool /*async_insert*/)
+ {
++    //return std::make_shared<MemorySink>(*this, metadata_snapshot, context, sketch_dp_configuration_map, sketch_cp_configuration_map);
+     return std::make_shared<MemorySink>(*this, metadata_snapshot, context);
+ }
+ 
+@@ -514,7 +800,9 @@ void registerStorageMemory(StorageFactory & factory)
+         if (has_settings)
+             settings.loadFromQuery(*args.storage_def);
+ 
+-        return std::make_shared<StorageMemory>(args.table_id, args.columns, args.constraints, args.comment, settings.compress);
++        //return std::make_shared<StorageMemory>(args.table_id, args.columns, args.constraints, args.comment, settings.compress);
++        // MILIND
++        return std::make_shared<StorageMemory>(args.table_id, args.columns, args.constraints, args.comment, settings.compress, settings.sketch_dp_configuration, settings.sketch_cp_configuration);
+     },
+     {
+         .supports_settings = true,
+diff --git a/src/Storages/StorageMemory.h b/src/Storages/StorageMemory.h
+index acb2be4649b..2af8f4c94ff 100644
+--- a/src/Storages/StorageMemory.h
++++ b/src/Storages/StorageMemory.h
+@@ -10,11 +10,30 @@
+ 
+ #include <Common/MultiVersion.h>
+ 
++// MILIND
++namespace Poco {class Logger;}
++
+ namespace DB
+ {
+ class IBackup;
+ using BackupPtr = std::shared_ptr<const IBackup>;
+ 
++struct SketchConfiguration
++{
++    String name;
++    unsigned int levels;
++    unsigned int rows;
++    unsigned int width;
++
++    SketchConfiguration(String name_, unsigned int levels_, unsigned int rows_, unsigned int width_)
++    {
++        name = name_;
++        levels = levels_;
++        rows = rows_;
++        width = width_;
++    }
++};
++
+ /** Implements storage in the RAM.
+   * Suitable for temporary data.
+   * It does not support keys.
+@@ -30,7 +49,11 @@ public:
+         ColumnsDescription columns_description_,
+         ConstraintsDescription constraints_,
+         const String & comment,
+-        bool compress_ = false);
++        bool compress_ = false,
++        // MILIND
++        const String & sketch_dp_configuration_ = "",
++        const String & sketch_cp_configuration_ = ""
++        );
+ 
+     String getName() const override { return "Memory"; }
+ 
+@@ -44,6 +67,7 @@ public:
+     };
+ 
+     StorageSnapshotPtr getStorageSnapshot(const StorageMetadataPtr & metadata_snapshot, ContextPtr query_context) const override;
++    StorageSnapshotPtr getStorageSnapshot(const StorageMetadataPtr & metadata_snapshot, const ASTPtr & query, ContextPtr query_context) const override;
+ 
+     void read(
+         QueryPlan & query_plan,
+@@ -134,6 +158,18 @@ private:
+     bool compress;
+ 
+     friend class ReadFromMemoryStorageStep;
++    
++    // MILIND
++    Poco::Logger * log;
++    String sketch_dp_configuration;
++    String sketch_cp_configuration;
++    std::unordered_map<String, SketchConfiguration> sketch_dp_configuration_map;
++    std::unordered_map<String, String> sketch_cp_configuration_map;
++
++    void parse_sketch_configurations();
++    String lookupSketchName(String metric_name) const override;
++    std::shared_ptr<const Blocks> convertSketchToBlocks(const String & query) const;
++    String getMetricName(const ASTPtr & query) const;
+ };
+ 
+-}
++};
